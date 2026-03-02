@@ -1,0 +1,401 @@
+{
+  "meta": {
+    "count": 10,
+    "description": "Mock Amadeus Flight Offers Search response for SFO → LHR, 2025-03-15, 1 adult, Economy"
+  },
+  "data": [
+    {
+      "id": "1",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "numberOfBookableSeats": 9,
+      "itineraries": [
+        {
+          "duration": "PT10H30M",
+          "segments": [
+            {
+              "departure": { "iataCode": "SFO", "terminal": "I", "at": "2025-03-15T17:00:00" },
+              "arrival": { "iataCode": "LHR", "terminal": "5", "at": "2025-03-16T11:30:00" },
+              "carrierCode": "BA",
+              "number": "286",
+              "aircraft": { "code": "777" },
+              "duration": "PT10H30M",
+              "numberOfStops": 0
+            }
+          ]
+        }
+      ],
+      "price": { "currency": "USD", "total": "489.00", "grandTotal": "489.00", "base": "389.00" },
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "fareDetailsBySegment": [
+            { "segmentId": "1", "cabin": "ECONOMY", "fareBasis": "VLOWGB", "class": "V", "includedCheckedBags": { "weight": 23, "weightUnit": "KG" } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "2",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "numberOfBookableSeats": 5,
+      "itineraries": [
+        {
+          "duration": "PT11H05M",
+          "segments": [
+            {
+              "departure": { "iataCode": "SFO", "terminal": "3", "at": "2025-03-15T10:15:00" },
+              "arrival": { "iataCode": "LHR", "terminal": "2", "at": "2025-03-16T05:20:00" },
+              "carrierCode": "UA",
+              "number": "901",
+              "aircraft": { "code": "789" },
+              "duration": "PT11H05M",
+              "numberOfStops": 0
+            }
+          ]
+        }
+      ],
+      "price": { "currency": "USD", "total": "520.00", "grandTotal": "520.00", "base": "420.00" },
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "fareDetailsBySegment": [
+            { "segmentId": "1", "cabin": "ECONOMY", "fareBasis": "KAA0AGDN", "class": "K", "includedCheckedBags": { "weight": 23, "weightUnit": "KG" } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "numberOfBookableSeats": 7,
+      "itineraries": [
+        {
+          "duration": "PT14H20M",
+          "segments": [
+            {
+              "departure": { "iataCode": "SFO", "terminal": "2", "at": "2025-03-15T06:00:00" },
+              "arrival": { "iataCode": "JFK", "terminal": "8", "at": "2025-03-15T14:35:00" },
+              "carrierCode": "AA",
+              "number": "178",
+              "aircraft": { "code": "321" },
+              "duration": "PT5H35M",
+              "numberOfStops": 0
+            },
+            {
+              "departure": { "iataCode": "JFK", "terminal": "8", "at": "2025-03-15T17:30:00" },
+              "arrival": { "iataCode": "LHR", "terminal": "3", "at": "2025-03-16T05:20:00" },
+              "carrierCode": "AA",
+              "number": "100",
+              "aircraft": { "code": "777" },
+              "duration": "PT6H50M",
+              "numberOfStops": 0
+            }
+          ]
+        }
+      ],
+      "price": { "currency": "USD", "total": "425.00", "grandTotal": "425.00", "base": "340.00" },
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "fareDetailsBySegment": [
+            { "segmentId": "1", "cabin": "ECONOMY", "fareBasis": "SAVNA7M6", "class": "S", "includedCheckedBags": { "quantity": 0 } },
+            { "segmentId": "2", "cabin": "ECONOMY", "fareBasis": "SAVNA7M6", "class": "S", "includedCheckedBags": { "quantity": 0 } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "numberOfBookableSeats": 4,
+      "itineraries": [
+        {
+          "duration": "PT10H45M",
+          "segments": [
+            {
+              "departure": { "iataCode": "SFO", "terminal": "I", "at": "2025-03-15T21:30:00" },
+              "arrival": { "iataCode": "LHR", "terminal": "3", "at": "2025-03-16T16:15:00" },
+              "carrierCode": "VS",
+              "number": "42",
+              "aircraft": { "code": "351" },
+              "duration": "PT10H45M",
+              "numberOfStops": 0
+            }
+          ]
+        }
+      ],
+      "price": { "currency": "USD", "total": "465.00", "grandTotal": "465.00", "base": "370.00" },
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "fareDetailsBySegment": [
+            { "segmentId": "1", "cabin": "ECONOMY", "fareBasis": "LLOW6M", "class": "L", "includedCheckedBags": { "weight": 23, "weightUnit": "KG" } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "numberOfBookableSeats": 3,
+      "itineraries": [
+        {
+          "duration": "PT10H15M",
+          "segments": [
+            {
+              "departure": { "iataCode": "SFO", "terminal": "I", "at": "2025-03-15T14:45:00" },
+              "arrival": { "iataCode": "LHR", "terminal": "5", "at": "2025-03-16T09:00:00" },
+              "carrierCode": "BA",
+              "number": "284",
+              "aircraft": { "code": "789" },
+              "duration": "PT10H15M",
+              "numberOfStops": 0
+            }
+          ]
+        }
+      ],
+      "price": { "currency": "USD", "total": "589.00", "grandTotal": "589.00", "base": "489.00" },
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "fareDetailsBySegment": [
+            { "segmentId": "1", "cabin": "ECONOMY", "fareBasis": "MLOWGB", "class": "M", "includedCheckedBags": { "weight": 23, "weightUnit": "KG" } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "numberOfBookableSeats": 9,
+      "itineraries": [
+        {
+          "duration": "PT9H55M",
+          "segments": [
+            {
+              "departure": { "iataCode": "SFO", "terminal": "I", "at": "2025-03-15T22:10:00" },
+              "arrival": { "iataCode": "LHR", "terminal": "2", "at": "2025-03-16T16:05:00" },
+              "carrierCode": "DY",
+              "number": "7016",
+              "aircraft": { "code": "789" },
+              "duration": "PT9H55M",
+              "numberOfStops": 0
+            }
+          ]
+        }
+      ],
+      "price": { "currency": "USD", "total": "389.00", "grandTotal": "389.00", "base": "319.00" },
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "fareDetailsBySegment": [
+            { "segmentId": "1", "cabin": "ECONOMY", "fareBasis": "LOWY", "class": "L", "includedCheckedBags": { "quantity": 0 } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "7",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "numberOfBookableSeats": 6,
+      "itineraries": [
+        {
+          "duration": "PT15H40M",
+          "segments": [
+            {
+              "departure": { "iataCode": "SFO", "terminal": "I", "at": "2025-03-15T11:20:00" },
+              "arrival": { "iataCode": "FRA", "terminal": "1", "at": "2025-03-16T06:55:00" },
+              "carrierCode": "LH",
+              "number": "459",
+              "aircraft": { "code": "346" },
+              "duration": "PT11H35M",
+              "numberOfStops": 0
+            },
+            {
+              "departure": { "iataCode": "FRA", "terminal": "1", "at": "2025-03-16T08:50:00" },
+              "arrival": { "iataCode": "LHR", "terminal": "2", "at": "2025-03-16T09:00:00" },
+              "carrierCode": "LH",
+              "number": "900",
+              "aircraft": { "code": "319" },
+              "duration": "PT1H10M",
+              "numberOfStops": 0
+            }
+          ]
+        }
+      ],
+      "price": { "currency": "USD", "total": "445.00", "grandTotal": "445.00", "base": "355.00" },
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "fareDetailsBySegment": [
+            { "segmentId": "1", "cabin": "ECONOMY", "fareBasis": "SNCEUR", "class": "S", "includedCheckedBags": { "weight": 23, "weightUnit": "KG" } },
+            { "segmentId": "2", "cabin": "ECONOMY", "fareBasis": "SNCEUR", "class": "S", "includedCheckedBags": { "weight": 23, "weightUnit": "KG" } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "numberOfBookableSeats": 8,
+      "itineraries": [
+        {
+          "duration": "PT14H55M",
+          "segments": [
+            {
+              "departure": { "iataCode": "SFO", "terminal": "I", "at": "2025-03-15T09:35:00" },
+              "arrival": { "iataCode": "AMS", "at": "2025-03-16T05:15:00" },
+              "carrierCode": "KL",
+              "number": "606",
+              "aircraft": { "code": "772" },
+              "duration": "PT10H40M",
+              "numberOfStops": 0
+            },
+            {
+              "departure": { "iataCode": "AMS", "at": "2025-03-16T07:25:00" },
+              "arrival": { "iataCode": "LHR", "terminal": "4", "at": "2025-03-16T07:30:00" },
+              "carrierCode": "KL",
+              "number": "1001",
+              "aircraft": { "code": "73H" },
+              "duration": "PT1H05M",
+              "numberOfStops": 0
+            }
+          ]
+        }
+      ],
+      "price": { "currency": "USD", "total": "412.00", "grandTotal": "412.00", "base": "332.00" },
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "fareDetailsBySegment": [
+            { "segmentId": "1", "cabin": "ECONOMY", "fareBasis": "LNCNL", "class": "L", "includedCheckedBags": { "weight": 23, "weightUnit": "KG" } },
+            { "segmentId": "2", "cabin": "ECONOMY", "fareBasis": "LNCNL", "class": "L", "includedCheckedBags": { "weight": 23, "weightUnit": "KG" } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "9",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "numberOfBookableSeats": 2,
+      "itineraries": [
+        {
+          "duration": "PT18H10M",
+          "segments": [
+            {
+              "departure": { "iataCode": "SFO", "terminal": "I", "at": "2025-03-15T08:00:00" },
+              "arrival": { "iataCode": "CDG", "terminal": "2E", "at": "2025-03-16T03:40:00" },
+              "carrierCode": "AF",
+              "number": "85",
+              "aircraft": { "code": "77W" },
+              "duration": "PT10H40M",
+              "numberOfStops": 0
+            },
+            {
+              "departure": { "iataCode": "CDG", "terminal": "2F", "at": "2025-03-16T07:55:00" },
+              "arrival": { "iataCode": "LHR", "terminal": "4", "at": "2025-03-16T08:10:00" },
+              "carrierCode": "AF",
+              "number": "1680",
+              "aircraft": { "code": "319" },
+              "duration": "PT1H15M",
+              "numberOfStops": 0
+            }
+          ]
+        }
+      ],
+      "price": { "currency": "USD", "total": "398.00", "grandTotal": "398.00", "base": "318.00" },
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "fareDetailsBySegment": [
+            { "segmentId": "1", "cabin": "ECONOMY", "fareBasis": "LOWFR", "class": "L", "includedCheckedBags": { "weight": 23, "weightUnit": "KG" } },
+            { "segmentId": "2", "cabin": "ECONOMY", "fareBasis": "LOWFR", "class": "L", "includedCheckedBags": { "weight": 23, "weightUnit": "KG" } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "10",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "numberOfBookableSeats": 1,
+      "itineraries": [
+        {
+          "duration": "PT10H30M",
+          "segments": [
+            {
+              "departure": { "iataCode": "SFO", "terminal": "I", "at": "2025-03-15T17:00:00" },
+              "arrival": { "iataCode": "LHR", "terminal": "5", "at": "2025-03-16T11:30:00" },
+              "carrierCode": "BA",
+              "number": "286",
+              "aircraft": { "code": "777" },
+              "duration": "PT10H30M",
+              "numberOfStops": 0
+            }
+          ]
+        }
+      ],
+      "price": { "currency": "USD", "total": "1250.00", "grandTotal": "1250.00", "base": "1050.00" },
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "fareDetailsBySegment": [
+            { "segmentId": "1", "cabin": "ECONOMY", "fareBasis": "YOWGB", "class": "Y", "includedCheckedBags": { "weight": 23, "weightUnit": "KG" }, "amenities": [{ "type": "REFUNDABLE", "description": "TICKET IS REFUNDABLE" }] }
+          ]
+        }
+      ]
+    }
+  ],
+  "dictionaries": {
+    "carriers": {
+      "BA": "BRITISH AIRWAYS",
+      "UA": "UNITED AIRLINES",
+      "AA": "AMERICAN AIRLINES",
+      "VS": "VIRGIN ATLANTIC",
+      "DY": "NORSE ATLANTIC AIRWAYS",
+      "LH": "LUFTHANSA",
+      "KL": "KLM ROYAL DUTCH AIRLINES",
+      "AF": "AIR FRANCE"
+    },
+    "aircraft": {
+      "777": "BOEING 777",
+      "789": "BOEING 787-9",
+      "321": "AIRBUS A321",
+      "351": "AIRBUS A350-1000",
+      "346": "AIRBUS A340-600",
+      "319": "AIRBUS A319",
+      "772": "BOEING 777-200",
+      "73H": "BOEING 737-800",
+      "77W": "BOEING 777-300ER"
+    }
+  }
+}
