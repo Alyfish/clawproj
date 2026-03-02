@@ -4,3 +4,12 @@ dist/
 *.local
 .env
 .env.*
+memory/
+!memory/.gitkeep
+.credentials/
+!.credentials/.gitkeep
+xcuserdata/
+*.xcuserstate
+__pycache__/
+*.pyc
+.pytest_cache/

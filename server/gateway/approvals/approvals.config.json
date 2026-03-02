@@ -1,0 +1,12 @@
+{
+  "policies": [
+    { "action": "submit", "requiresApproval": "always" },
+    { "action": "pay", "requiresApproval": "always" },
+    { "action": "send", "requiresApproval": "always" },
+    { "action": "delete", "requiresApproval": "always" },
+    { "action": "share_personal_info", "requiresApproval": "always" },
+    { "action": "search", "requiresApproval": "never" },
+    { "action": "read", "requiresApproval": "never" },
+    { "action": "monitor", "requiresApproval": "configurable", "allowlist": ["portfolio", "flight_status", "price_alert"] }
+  ]
+}
