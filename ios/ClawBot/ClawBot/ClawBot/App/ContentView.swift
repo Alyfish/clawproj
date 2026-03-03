@@ -1,12 +1,20 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var taskViewModel = TaskFeedViewModel(webSocket: MockWebSocketService())
-    @StateObject private var approvalsViewModel = ApprovalsViewModel(webSocket: MockWebSocketService())
+    @StateObject private var webSocket: WebSocketService
+    @StateObject private var taskViewModel: TaskFeedViewModel
+    @StateObject private var approvalsViewModel: ApprovalsViewModel
+
+    init() {
+        let ws = WebSocketService()
+        _webSocket = StateObject(wrappedValue: ws)
+        _taskViewModel = StateObject(wrappedValue: TaskFeedViewModel(webSocket: ws))
+        _approvalsViewModel = StateObject(wrappedValue: ApprovalsViewModel(webSocket: ws))
+    }
 
     var body: some View {
         TabView {
-            ChatView()
+            ChatView(webSocket: webSocket)
                 .tabItem {
                     Label("Chat", systemImage: "bubble.left.and.bubble.right")
                 }

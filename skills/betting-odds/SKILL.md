@@ -7,7 +7,7 @@ description: >-
   bets, value bet, line movement, best lines, sportsbook comparison, implied
   probability, vig, juice, or any sports wagering topic — even if they don't
   explicitly say "betting."
-tools: [http_request, code_execution, create_card, save_memory]
+tools: [http_request, browser, code_execution, create_card, save_memory]
 approval_actions: [pay]
 version: 1.0.0
 author: clawbot
@@ -46,7 +46,8 @@ round robin, futures, outrights.
 - Env var: `CLAWBOT_CRED_ODDS_API`
 - Applied as query parameter: `?apiKey={key}`
 - Free tier: 500 requests/month
-- If credential is missing, operate in **mock mode** (see below)
+- If credential is missing, try **Browser Mode** first (ESPN/OddsShark scraping for real data)
+- If browser also fails, operate in **Mock Mode** (see below)
 
 ## API: The Odds API (V4)
 
@@ -428,9 +429,143 @@ When showing odds for multiple games:
 - For parlays, create individual cards for each leg PLUS a summary card with
   combined odds in the `line` field
 
+## Browser Mode (Fallback — No API Key Needed)
+
+When `CLAWBOT_CRED_ODDS_API` is not set, use the `browser` tool to scrape real odds data from public sports sites. This provides real data without any API key.
+
+### Site Priority
+
+1. **ESPN** — Most reliable, minimal anti-bot, covers major US sports
+2. **OddsShark** — Good fallback, more detailed odds comparison
+
+### Sport Key to ESPN URL
+
+| Sport Key / User Request | ESPN URL |
+|--------------------------|----------|
+| `basketball_nba` / "NBA" | `https://www.espn.com/nba/odds` |
+| `americanfootball_nfl` / "NFL" | `https://www.espn.com/nfl/odds` |
+| `baseball_mlb` / "MLB" | `https://www.espn.com/mlb/odds` |
+| `icehockey_nhl` / "NHL" | `https://www.espn.com/nhl/odds` |
+| `americanfootball_ncaaf` / "NCAAF" | `https://www.espn.com/college-football/odds` |
+| `basketball_ncaab` / "NCAAB" | `https://www.espn.com/mens-college-basketball/odds` |
+| Soccer, MMA, other | Not available on ESPN — fall through to OddsShark or Mock Mode |
+
+### Strategy: ESPN Odds
+
+**Step 1: Navigate to sport odds page**
+
+```
+Tool: browser
+{
+  "action": "navigate",
+  "params": {"url": "https://www.espn.com/nba/odds"}
+}
+```
+
+**Step 2: Wait for odds content to load**
+
+```
+Tool: browser
+{
+  "action": "wait_for_selector",
+  "params": {"selector": "table", "timeout": 10000}
+}
+```
+
+**Step 3: Extract page content**
+
+```
+Tool: browser
+{
+  "action": "get_page_content",
+  "params": {}
+}
+```
+
+**Step 4: Parse odds from page text**
+
+ESPN odds pages display in table format with columns for each sportsbook. Use `code_execution` to parse:
+
+```python
+Tool: code_execution
+{
+  "language": "python",
+  "code": "import re, json\n\npage_text = '''<paste page content here>'''\n\nevents = []\nlines = [l.strip() for l in page_text.split('\\n') if l.strip()]\n\n# ESPN typically shows odds in blocks per game:\n# Team name lines, followed by odds (spread, ML, total) from each book\n# Look for patterns like: team names, +/- numbers, O/U numbers\n\nspread_pattern = r'([+-]\\d+\\.?\\d*)\\s*\\(([+-]\\d+)\\)'\nml_pattern = r'([+-]\\d{3,})'\ntotal_pattern = r'([OU])\\s*(\\d+\\.?\\d*)'\n\ncurrent_event = {}\nfor line in lines:\n    # Adapt parsing based on actual ESPN text structure\n    spreads = re.findall(spread_pattern, line)\n    mls = re.findall(ml_pattern, line)\n    totals = re.findall(total_pattern, line)\n    \n    if spreads:\n        spread_val, spread_price = spreads[0]\n        current_event.setdefault('odds', {})['spread'] = float(spread_val)\n        current_event['odds']['spread_price'] = int(spread_price)\n    if mls:\n        current_event.setdefault('odds', {})['moneyline'] = int(mls[0])\n    if totals:\n        current_event.setdefault('odds', {})['total'] = float(totals[0][1])\n        current_event['odds']['total_side'] = totals[0][0]\n\n# Output whatever structure was extracted\nprint(json.dumps(events[:15], indent=2))"
+}
+```
+
+**IMPORTANT:** The parsing code above is a template. ESPN page format varies by sport and season. Always inspect the `get_page_content` output first and adapt the parsing accordingly. The LLM should reason about the actual text structure.
+
+**Step 5: Scroll for more games (if needed)**
+
+```
+Tool: browser
+{
+  "action": "scroll",
+  "params": {"direction": "down", "amount": 1500}
+}
+```
+
+### Strategy: OddsShark (Fallback)
+
+If ESPN fails or the sport isn't available on ESPN:
+
+```
+Tool: browser
+{
+  "action": "navigate",
+  "params": {"url": "https://www.oddsshark.com/nba/odds"}
+}
+```
+
+Follow the same `get_page_content` → `code_execution` pipeline. OddsShark URLs follow the pattern: `https://www.oddsshark.com/{sport}/odds`
+
+### Card Mapping from Browser Results
+
+Map parsed fields to PickCard format:
+
+| Parsed Field | PickCard Field |
+|-------------|---------------|
+| home team / away team | `matchup.home` / `matchup.away` |
+| sport | `sport` (derive from URL) |
+| league | `league` (derive from URL) |
+| spread value + price | `line` (format: "{team} {spread} ({price})") |
+| moneyline | Alternative `line` format for h2h |
+| implied probability | `impliedOdds` (calculate from best odds) |
+
+Set `source` to `"ESPN (browser)"` or `"OddsShark (browser)"`.
+
+Fields not available via browser scraping:
+- `event_id` — generate synthetic ID from team names + date
+- `recentMovement` — set to "No movement data (browser scrape)" unless previous snapshot exists in memory
+- `metadata.ev_percent` — cannot calculate without multi-book vig-removed odds
+- `metadata.bookmaker_count` — set based on how many books ESPN shows (typically 4-6)
+
+### Browser Limitations
+
+When using browser-scraped odds, these limitations apply:
+- **No player props** — only main markets (spreads, moneylines, totals)
+- **No event IDs** — cannot use for single-event deep dives
+- **Fewer bookmakers** — ESPN shows 4-6 books vs API's 10+
+- **No live score integration** — scores endpoint not available via scraping
+- **No quota tracking** — no API quota to manage
+- **Line movement** — compare to saved memory snapshots (same as API approach)
+
+### Anti-Bot Handling
+
+1. ESPN blocked → try OddsShark
+2. OddsShark blocked → fall through to Mock Mode
+3. Both blocked: tell user "Browser scraping is currently blocked. Showing simulated odds. Add The Odds API credential for live data: set `CLAWBOT_CRED_ODDS_API` env var."
+
+### Browser Source Attribution
+
+When presenting browser-scraped results, add:
+> **Data via ESPN** — Showing odds from ESPN.com. For more bookmakers and player props, add The Odds API credential: set `CLAWBOT_CRED_ODDS_API` env var.
+
+
 ## Mock Mode
 
-When `CLAWBOT_CRED_ODDS_API` is not set, generate realistic synthetic data.
+When `CLAWBOT_CRED_ODDS_API` is not set AND browser scraping has failed or is unavailable, generate realistic synthetic data.
 Clearly indicate mock mode: add `"[MOCK DATA]"` prefix to card titles.
 
 ### Mock Data Rules

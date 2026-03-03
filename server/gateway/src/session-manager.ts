@@ -55,6 +55,22 @@ export default class SessionManager {
     return this.sessions.get(id);
   }
 
+  findSessionForRole(role: ClientRole): Session | undefined {
+    const complementary = role === 'node' ? 'operator' : 'node';
+    let best: Session | undefined;
+    for (const session of this.sessions.values()) {
+      const hasComplement = Array.from(session.clients.values()).some(
+        (c) => c.role === complementary,
+      );
+      if (hasComplement) {
+        if (!best || session.lastActivity > best.lastActivity) {
+          best = session;
+        }
+      }
+    }
+    return best;
+  }
+
   listSessions(): Session[] {
     return Array.from(this.sessions.values());
   }

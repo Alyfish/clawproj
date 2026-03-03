@@ -39,6 +39,14 @@ Save preferences to memory with `save_memory` using key `user-apartment-prefs` s
 
 ---
 
+## Data Source Priority
+
+1. **API Search** (Zillow via RapidAPI) — if `zillow-rapidapi` credential exists (best data)
+2. **Browser Search** — scrape Apartments.com, Craigslist, or Zillow directly (no API key needed)
+3. **Mock Mode** — generate demo listings (only for demos/testing when browser is unavailable)
+
+---
+
 ## Search Strategies
 
 ### Strategy 1: API Search (Zillow via RapidAPI)
@@ -130,6 +138,62 @@ For each listing found, extract:
 - **Source URL** — Link to original listing
 
 Use `code_execution` to parse structured data from the browser output if needed.
+
+### Recommended Site Order
+
+Try sites in this order for best scraping reliability:
+
+1. **Apartments.com** — best balance of data and scraping reliability
+2. **Craigslist** — always works (minimal anti-bot), but less data
+3. **Zillow** — most data, but most aggressive anti-bot (may show CAPTCHA)
+
+### Recommended Extraction Pipeline
+
+The most reliable approach for all browser targets:
+
+1. **Navigate** to the site with search parameters in the URL
+2. **Wait for content** to load (wait_for_selector if needed)
+3. **Get page content** to extract all text
+4. **Parse with code_execution** to extract structured data
+
+**Example for Apartments.com:**
+
+```
+Tool: browser
+{"action": "navigate", "params": {"url": "https://www.apartments.com/austin-tx/2-bedrooms/under-2000/"}}
+```
+
+```
+Tool: browser
+{"action": "get_page_content", "params": {}}
+```
+
+Then parse with code_execution:
+
+```python
+import re, json
+page_text = '''<page content>'''
+
+listings = []
+# Apartments.com text typically shows: property name, address, price range, beds/baths
+price_pattern = r'\$[\d,]+'
+beds_pattern = r'(\d+)\s*(?:Bed|BR|Bedroom)'
+sqft_pattern = r'([\d,]+)\s*(?:sq\s*ft|sqft|SF)'
+# Adapt regex based on actual page content
+```
+
+**Example for Craigslist (most scraping-friendly):**
+
+URL: `https://{city}.craigslist.org/search/apa?max_price={budget}&min_bedrooms={beds}`
+
+Craigslist has minimal anti-bot and clean HTML. Try this first if Apartments.com and Zillow block.
+
+### Anti-Bot Fallback
+
+If a site blocks the browser (CAPTCHA detected), skip to the next site:
+1. Apartments.com blocked → try Craigslist
+2. Craigslist blocked → try Zillow
+3. All blocked → fall through to Mock Mode with message: "Browser scraping is currently blocked. Showing demo listings. Add Zillow API credential for live data."
 
 ---
 
@@ -420,7 +484,7 @@ Best regards,
 
 ## Mock Mode
 
-When no API credentials are configured and browser search is unavailable (or for demos), generate realistic mock listings.
+When no API credentials are configured AND browser search has failed or is unavailable, generate realistic mock listings.
 
 ### Mock Data Generator
 

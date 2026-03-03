@@ -56,14 +56,18 @@ class AgentConfig:
     soul_path: str = "SOUL.md"
     credentials_path: str = ".credentials/"
 
+    # --- OpenRouter fallback ---
+    openrouter_api_key: str = ""      # loaded from OPENROUTER_API_KEY
+    openrouter_model: str = "anthropic/claude-sonnet-4-5-20250929"  # loaded from OPENROUTER_MODEL
+
     # --- Test mode ---
     test_mode: bool = False           # stdin/stdout instead of gateway
     mock_tools: bool = False          # use mock tool results
 
     def __post_init__(self) -> None:
-        # Load API key from environment
+        # Load API key from environment (accept both var names)
         if not self.api_key:
-            self.api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            self.api_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("CLAUDE_API_KEY", "")
 
         # Auto-detect project root (walk up from this file to find SOUL.md)
         if not self.project_root:
@@ -82,6 +86,11 @@ class AgentConfig:
         self.memory_dir = str(root / self.memory_dir)
         self.soul_path = str(root / self.soul_path)
         self.credentials_path = str(root / self.credentials_path)
+
+        # Load OpenRouter config from environment (accept both var names)
+        if not self.openrouter_api_key:
+            self.openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "") or os.environ.get("OPEN_ROUTER_API_KEY", "")
+        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", self.openrouter_model)
 
         # Override from environment
         self.model = os.environ.get("CLAWBOT_MODEL", self.model)

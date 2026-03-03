@@ -83,6 +83,8 @@ class BrowserBridge(BaseTool):
                     "extract_data",
                     "take_screenshot",
                     "get_page_content",
+                    "wait_for_selector",
+                    "scroll",
                 ],
             },
             "params": {
@@ -96,7 +98,9 @@ class BrowserBridge(BaseTool):
                     "click: {selector_or_text}. "
                     "extract_data: {selectors: [{name, selector}]}. "
                     "take_screenshot: {}. "
-                    "get_page_content: {}."
+                    "get_page_content: {}. "
+                    "wait_for_selector: {selector, timeout?}. "
+                    "scroll: {direction?, amount?, selector?}."
                 ),
             },
             "session_id": {

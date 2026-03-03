@@ -91,11 +91,17 @@ async def main(args: argparse.Namespace) -> None:
         memory_system=memory_manager.store,
     )
 
+    # Context tools — populate <available_tools> section in system prompt
+    context_builder.set_tools(tool_registry.get_tool_definitions())
+
     # Gateway client
     if config.test_mode:
         gateway: GatewayClient | MockGatewayClient = MockGatewayClient()
     else:
         gateway = GatewayClient(config)
+
+    # Wire gateway to tools that need it (create_card, request_approval)
+    tool_registry.set_gateway_client(gateway)
 
     # 4. Create the agent
     agent = Agent(

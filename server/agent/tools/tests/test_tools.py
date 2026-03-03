@@ -504,19 +504,36 @@ class TestCreateCardTool:
         assert card["title"] == "LAX → JFK"
         assert card["source"] == "agent"
         assert "T" in card["createdAt"]  # ISO 8601
+        # Typed card metadata promoted to root for iOS decoder
+        assert card["price"] == 299
 
     @pytest.mark.asyncio
-    async def test_create_card_emits_event(self):
+    async def test_create_card_kwargs_merged(self):
+        """Extra kwargs go to root level for iOS typed card decoders."""
+        tool = CreateCardTool()
+        result = await tool.execute(
+            type="flight", title="UA 123",
+            airline="United", route={"from": "SFO", "to": "JFK"},
+        )
+        assert result.success is True
+        card = result.output
+        assert card["airline"] == "United"
+        assert card["route"] == {"from": "SFO", "to": "JFK"}
+        # kwargs don't overwrite base fields
+        assert card["type"] == "flight"
+
+    @pytest.mark.asyncio
+    async def test_create_card_no_direct_emit(self):
+        """create_card no longer emits directly — agent.py handles emission."""
         gw = MockGatewayClient()
         tool = CreateCardTool(gateway_client=gw)
         result = await tool.execute(
             type="house", title="2BR Apt", metadata={"rent": 1500}
         )
         assert result.success is True
-        assert len(gw.events) == 1
-        event_name, payload = gw.events[0]
-        assert event_name == "card/created"
-        assert payload["type"] == "house"
+        assert len(gw.events) == 0  # emit handled by agent.py, not tool
+        assert result.output["type"] == "house"
+        assert result.output["title"] == "2BR Apt"
 
     @pytest.mark.asyncio
     async def test_create_card_no_gateway(self):

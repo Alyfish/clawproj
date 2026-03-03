@@ -9,6 +9,7 @@ enum AnyCard: Identifiable, Equatable {
     case house(HouseCard)
     case pick(PickCard)
     case doc(DocCard)
+    case base(BaseCard)
 
     var id: String {
         switch self {
@@ -16,6 +17,7 @@ enum AnyCard: Identifiable, Equatable {
         case .house(let card): return card.id
         case .pick(let card): return card.id
         case .doc(let card): return card.id
+        case .base(let card): return card.id
         }
     }
 }
@@ -41,11 +43,7 @@ extension AnyCard: Codable {
         case "doc":
             self = .doc(try DocCard(from: decoder))
         default:
-            throw DecodingError.dataCorruptedError(
-                forKey: .type,
-                in: container,
-                debugDescription: "Unknown card type: \(type)"
-            )
+            self = .base(try BaseCard(from: decoder))
         }
     }
 
@@ -65,6 +63,30 @@ extension AnyCard: Codable {
         case .doc(let card):
             try container.encode("doc", forKey: .type)
             try card.encode(to: encoder)
+        case .base(let card):
+            // BaseCard encodes its own `type` field — no double-encoding
+            try card.encode(to: encoder)
+        }
+    }
+}
+
+// MARK: - Computed Properties
+
+extension AnyCard {
+    /// Returns the BaseCard if this is a `.base` case, nil otherwise.
+    var baseCard: BaseCard? {
+        if case .base(let card) = self { return card }
+        return nil
+    }
+
+    /// Returns the card's type discriminator string.
+    var cardType: String {
+        switch self {
+        case .flight: return "flight"
+        case .house: return "house"
+        case .pick: return "pick"
+        case .doc: return "doc"
+        case .base(let card): return card.type
         }
     }
 }
@@ -79,5 +101,6 @@ extension AnyCard {
         .house(HouseCard.mockRedFlags),
         .pick(PickCard.mockFavorable),
         .doc(DocCard.mockDocument),
+        .base(BaseCard.mockShopifyOrder),
     ]
 }

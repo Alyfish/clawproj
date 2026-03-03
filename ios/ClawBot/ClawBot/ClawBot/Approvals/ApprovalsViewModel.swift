@@ -29,7 +29,6 @@ final class ApprovalsViewModel: ObservableObject {
     ) {
         self.webSocket = webSocket
         self.notificationManager = notificationManager ?? NotificationManager.shared
-        loadMockData()
 
         webSocket.streamEventPublisher
             .receive(on: DispatchQueue.main)

@@ -18,6 +18,12 @@ enum StreamEvent {
         id: String, taskId: String, action: String,
         description: String, details: [String: AnyCodable]
     )
+    /// Tool execution started.
+    case toolStarted(toolName: String, description: String)
+    /// Tool execution completed.
+    case toolCompleted(toolName: String, success: Bool, summary: String)
+    /// Structured card created by agent.
+    case cardCreated(card: [String: AnyCodable])
     /// Unrecognised event name — forward-compatible.
     case unknown(event: String, payload: [String: AnyCodable]?)
 
@@ -80,6 +86,25 @@ enum StreamEvent {
                 id: id, taskId: taskId, action: action,
                 description: description, details: details
             )
+
+        case "agent/tool:start":
+            guard
+                let toolName = p?["toolName"]?.stringValue,
+                let description = p?["description"]?.stringValue
+            else { return nil }
+            return .toolStarted(toolName: toolName, description: description)
+
+        case "agent/tool:end":
+            guard
+                let toolName = p?["toolName"]?.stringValue,
+                let summary = p?["summary"]?.stringValue
+            else { return nil }
+            let success = p?["success"]?.boolValue ?? false
+            return .toolCompleted(toolName: toolName, success: success, summary: summary)
+
+        case "card/created":
+            guard let card = p?["card"]?.dictValue else { return nil }
+            return .cardCreated(card: card.mapValues { AnyCodable($0) })
 
         default:
             return .unknown(event: eventName, payload: p)

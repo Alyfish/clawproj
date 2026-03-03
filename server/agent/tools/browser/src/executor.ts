@@ -69,7 +69,9 @@ type BrowserAction =
   | 'click'
   | 'extract_data'
   | 'take_screenshot'
-  | 'get_page_content';
+  | 'get_page_content'
+  | 'wait_for_selector'
+  | 'scroll';
 
 // ============================================================
 // ACTION EXECUTOR
@@ -141,6 +143,8 @@ export class ActionExecutor {
       extract_data: (p, pr) => this.extractData(p, pr),
       take_screenshot: (p, pr) => this.takeScreenshot(p, pr),
       get_page_content: (p, pr) => this.getPageContent(p, pr),
+      wait_for_selector: (p, pr) => this.waitForSelector(p, pr),
+      scroll: (p, pr) => this.scroll(p, pr),
     };
 
     const handler = dispatch[action as BrowserAction];
@@ -611,6 +615,107 @@ export class ActionExecutor {
         content,
         contentLength: rawText.length,
         truncated,
+      },
+      screenshot,
+    };
+  }
+
+  // ----------------------------------------------------------
+  // ACTION: wait_for_selector
+  // ----------------------------------------------------------
+
+  private async waitForSelector(
+    page: Page,
+    params: Record<string, any>,
+  ): Promise<ActionResult> {
+    const selector = (params.selector as string | undefined)?.trim();
+    if (!selector) {
+      const screenshot = await this.captureScreenshot(page);
+      return {
+        success: false,
+        result: null,
+        screenshot,
+        error: 'Missing required parameter: selector',
+      };
+    }
+
+    const timeout = Math.min(
+      Math.max(Number(params.timeout) || 10_000, 1_000),
+      30_000,
+    );
+
+    try {
+      await page.waitForSelector(selector, {
+        state: 'visible',
+        timeout,
+      });
+    } catch {
+      const screenshot = await this.captureScreenshot(page);
+      return {
+        success: false,
+        result: null,
+        screenshot,
+        error: `Selector "${selector}" did not appear within ${timeout}ms`,
+      };
+    }
+
+    const elementText = await page
+      .locator(selector)
+      .first()
+      .innerText()
+      .catch(() => '');
+
+    const screenshot = await this.captureScreenshot(page);
+    return {
+      success: true,
+      result: {
+        selector,
+        found: true,
+        preview: this.truncate(elementText, 500),
+      },
+      screenshot,
+    };
+  }
+
+  // ----------------------------------------------------------
+  // ACTION: scroll
+  // ----------------------------------------------------------
+
+  private async scroll(
+    page: Page,
+    params: Record<string, any>,
+  ): Promise<ActionResult> {
+    const direction = (params.direction as string) || 'down';
+    const amount = Math.min(Math.max(Number(params.amount) || 800, 100), 5000);
+    const selector = (params.selector as string | undefined)?.trim();
+
+    if (selector) {
+      try {
+        const locator = page.locator(selector).first();
+        await locator.scrollIntoViewIfNeeded({ timeout: 10_000 });
+      } catch {
+        const screenshot = await this.captureScreenshot(page);
+        return {
+          success: false,
+          result: null,
+          screenshot,
+          error: `Could not scroll to element: "${selector}"`,
+        };
+      }
+    } else {
+      const delta = direction === 'up' ? -amount : amount;
+      await page.evaluate((d: number) => window.scrollBy(0, d), delta);
+    }
+
+    await page.waitForTimeout(POST_ACTION_WAIT);
+
+    const screenshot = await this.captureScreenshot(page);
+    return {
+      success: true,
+      result: {
+        direction,
+        amount,
+        ...(selector ? { scrolledTo: selector } : {}),
       },
       screenshot,
     };

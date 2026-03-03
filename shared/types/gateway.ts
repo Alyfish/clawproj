@@ -66,7 +66,7 @@ export interface SkillLoadedEvent {
 
 export interface CardCreatedEvent {
   event: 'card/created';
-  payload: BaseCard;
+  payload: { card: BaseCard };
 }
 
 export interface MemoryUpdatedEvent {
@@ -89,9 +89,9 @@ export type StreamEvent =
 // ── Client request payloads (client → server) ──────────────
 
 export interface ChatSendPayload {
-  message: string;
-  /** Idempotency key — required */
-  idempotencyKey: string;
+  text: string;
+  /** Idempotency key — optional */
+  idempotencyKey?: string;
 }
 
 export interface ApprovalResolvePayload {

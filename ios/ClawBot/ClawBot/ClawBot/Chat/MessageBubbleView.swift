@@ -12,7 +12,9 @@ struct MessageBubbleView: View {
             }
 
             Group {
-                if message.role == .assistant {
+                if let card = message.card {
+                    cardView(for: card)
+                } else if message.role == .assistant {
                     if message.isStreaming && message.content.isEmpty {
                         ProgressView()
                             .controlSize(.small)
@@ -28,9 +30,9 @@ struct MessageBubbleView: View {
                         .foregroundStyle(.white)
                 }
             }
-            .padding(message.role == .user ? 12 : 0)
+            .padding(message.card != nil ? 0 : (message.role == .user ? 12 : 0))
             .background(
-                message.role == .user
+                message.role == .user && message.card == nil
                     ? RoundedRectangle(cornerRadius: 18)
                         .fill(Color.blue)
                     : nil
@@ -43,9 +45,27 @@ struct MessageBubbleView: View {
                 }
             }
 
-            if message.role == .assistant {
+            if message.role == .assistant || message.card != nil {
                 Spacer(minLength: 0)
             }
+        }
+    }
+
+    // MARK: - Card dispatch
+
+    @ViewBuilder
+    private func cardView(for card: AnyCard) -> some View {
+        switch card {
+        case .flight(let flight):
+            FlightCardView(card: flight)
+        case .house(let house):
+            HouseCardView(card: house)
+        case .pick(let pick):
+            PickCardView(card: pick)
+        case .doc(let doc):
+            DocCardView(card: doc)
+        case .base(let base):
+            GenericCardView(card: base)
         }
     }
 }
@@ -66,4 +86,22 @@ struct MessageBubbleView: View {
 #Preview("Streaming empty") {
     MessageBubbleView(message: ChatMessage.assistantPlaceholder())
         .padding()
+}
+
+#Preview("Card bubble — Flight") {
+    MessageBubbleView(message: ChatMessage(
+        role: .assistant,
+        content: "",
+        card: .flight(.mockDefault)
+    ))
+    .padding()
+}
+
+#Preview("Card bubble — Generic") {
+    MessageBubbleView(message: ChatMessage(
+        role: .assistant,
+        content: "",
+        card: .base(.mockShopifyOrder)
+    ))
+    .padding()
 }

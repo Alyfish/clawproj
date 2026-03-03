@@ -385,6 +385,18 @@ class ToolRegistry:
         )
         return result
 
+    def set_gateway_client(self, client: Any) -> None:
+        """Wire gateway client to tools that need it (post-init).
+
+        Iterates all registered tools and calls set_gateway_client()
+        on any that expose the method (e.g., CreateCardTool, RequestApprovalTool).
+        """
+        with self._lock:
+            for tool in self._tools.values():
+                if hasattr(tool, "set_gateway_client"):
+                    tool.set_gateway_client(client)
+                    logger.info("Wired gateway_client to tool: %s", tool.name)
+
     def __repr__(self) -> str:
         return f"<ToolRegistry tools={self.list_tools()}>"
 

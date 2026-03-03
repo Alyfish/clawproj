@@ -8,7 +8,12 @@ import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
 import SessionManager from './session-manager.js';
 import MessageRouter from './message-router.js';
-import type { ConnectedClient, ConnectPayload, WSMessage } from './types.js';
+import type {
+  ClientRole,
+  ConnectedClient,
+  ConnectPayload,
+  WSMessage,
+} from './types.js';
 
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 
@@ -213,11 +218,11 @@ export default class GatewayServer {
       } else {
         // Reconnect failed — treat as new connection
         deviceToken = uuidv4();
-        sessionId = this.resolveSessionId(payload.sessionId);
+        sessionId = this.resolveSessionId(payload.sessionId, payload.role);
       }
     } else {
       deviceToken = uuidv4();
-      sessionId = this.resolveSessionId(payload.sessionId);
+      sessionId = this.resolveSessionId(payload.sessionId, payload.role);
     }
 
     const now = new Date().toISOString();
@@ -270,7 +275,10 @@ export default class GatewayServer {
     });
   }
 
-  private resolveSessionId(requestedSessionId?: string): string {
+  private resolveSessionId(
+    requestedSessionId?: string,
+    role?: ClientRole,
+  ): string {
     if (requestedSessionId) {
       const existing = this.sessionManager.getSession(requestedSessionId);
       if (existing) {
@@ -280,6 +288,14 @@ export default class GatewayServer {
         requestedSessionId,
         action: 'creating_new',
       });
+    }
+    // Auto-join: find a session with the complementary role
+    if (role) {
+      const match = this.sessionManager.findSessionForRole(role);
+      if (match) {
+        log('info', 'session:auto_joined', { sessionId: match.id, role });
+        return match.id;
+      }
     }
     return this.sessionManager.createSession().id;
   }

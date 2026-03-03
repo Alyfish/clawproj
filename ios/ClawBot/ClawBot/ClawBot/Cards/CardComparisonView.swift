@@ -56,6 +56,8 @@ struct CardComparisonView: View {
             PickCardView(card: pick)
         case .doc(let doc):
             DocCardView(card: doc)
+        case .base(let base):
+            GenericCardView(card: base)
         }
     }
 
@@ -68,6 +70,7 @@ struct CardComparisonView: View {
         case .house: return 480
         case .pick: return 300
         case .doc: return 250
+        case .base: return 350
         }
     }
 

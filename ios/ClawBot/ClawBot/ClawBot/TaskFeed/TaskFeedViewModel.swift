@@ -26,7 +26,6 @@ final class TaskFeedViewModel: ObservableObject {
 
     init(webSocket: any WebSocketServiceProtocol) {
         self.webSocket = webSocket
-        loadMockData()
 
         webSocket.streamEventPublisher
             .receive(on: DispatchQueue.main)
@@ -39,8 +38,8 @@ final class TaskFeedViewModel: ObservableObject {
     // MARK: - Public actions
 
     func refresh() async {
-        // MVP: reload mock data. Replace with real API fetch later.
-        loadMockData()
+        // Tasks come from real-time gateway events.
+        // TODO: Request task list from gateway on pull-to-refresh.
     }
 
     func stopTask(_ taskId: String) {
@@ -83,19 +82,34 @@ final class TaskFeedViewModel: ObservableObject {
     private func handleEvent(_ event: StreamEvent) {
         switch event {
         case .taskUpdate(let taskId, let status, let step):
-            guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
-            if let newStatus = TaskStatus(rawValue: status) {
-                tasks[index].status = newStatus
-            }
-            if let step {
-                // Replace existing step or append
-                if let stepIndex = tasks[index].steps.firstIndex(where: { $0.id == step.id }) {
-                    tasks[index].steps[stepIndex] = step
-                } else {
-                    tasks[index].steps.append(step)
+            if let index = tasks.firstIndex(where: { $0.id == taskId }) {
+                // Update existing task
+                if let newStatus = TaskStatus(rawValue: status) {
+                    tasks[index].status = newStatus
                 }
+                if let step {
+                    if let stepIndex = tasks[index].steps.firstIndex(where: { $0.id == step.id }) {
+                        tasks[index].steps[stepIndex] = step
+                    } else {
+                        tasks[index].steps.append(step)
+                    }
+                }
+                tasks[index].updatedAt = ISO8601DateFormatter().string(from: Date())
+            } else {
+                // Create new task on first event
+                let now = ISO8601DateFormatter().string(from: Date())
+                let newTask = AgentTask(
+                    id: taskId,
+                    status: TaskStatus(rawValue: status) ?? .executing,
+                    goal: step?.description ?? "Processing...",
+                    steps: step.map { [$0] } ?? [],
+                    cardIds: [],
+                    approvalIds: [],
+                    createdAt: now,
+                    updatedAt: now
+                )
+                tasks.insert(newTask, at: 0)
             }
-            tasks[index].updatedAt = ISO8601DateFormatter().string(from: Date())
 
         case .approvalRequested(let id, let taskId, let action, let description, _):
             guard !pendingApprovals.contains(where: { $0.id == id }) else { return }

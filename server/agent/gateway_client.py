@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 
 import websockets
-from websockets.client import WebSocketClientProtocol
+from websockets.asyncio.client import ClientConnection
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class GatewayClient:
 
     def __init__(self, config: Any) -> None:
         self.config = config
-        self._ws: WebSocketClientProtocol | None = None
+        self._ws: ClientConnection | None = None
         self._connected: bool = False
         self._session_id: str | None = None
         self._device_token: str | None = None
@@ -122,7 +122,7 @@ class GatewayClient:
     async def disconnect(self) -> None:
         """Disconnect from gateway and signal shutdown."""
         self._shutdown_event.set()
-        if self._ws and not self._ws.closed:
+        if self._ws and self._ws.close_code is None:
             await self._ws.close()
         self._connected = False
         self._ws = None
@@ -153,7 +153,7 @@ class GatewayClient:
     @property
     def is_connected(self) -> bool:
         """Whether the WebSocket connection is active."""
-        return self._connected and self._ws is not None and not self._ws.closed
+        return self._connected and self._ws is not None and self._ws.close_code is None
 
     # ── Message Receiving ───────────────────────────────────────
 

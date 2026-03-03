@@ -47,6 +47,10 @@ class RequestApprovalTool(BaseTool):
     ) -> None:
         self._gateway_client = gateway_client
 
+    def set_gateway_client(self, client: Any) -> None:
+        """Wire gateway client after initialization."""
+        self._gateway_client = client
+
     @property
     def name(self) -> str:
         return "request_approval"

@@ -30,11 +30,12 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Init
 
     init(
-        webSocket: any WebSocketServiceProtocol = WebSocketService(),
+        webSocket: (any WebSocketServiceProtocol)? = nil,
         messageStore: MessageStore = MessageStore(),
         serverURL: URL = URL(string: "ws://localhost:8080")!
     ) {
-        self.webSocket = webSocket
+        let ws = webSocket ?? WebSocketService()
+        self.webSocket = ws
         self.messageStore = messageStore
         self.serverURL = serverURL
         setupSubscriptions()
@@ -103,6 +104,21 @@ final class ChatViewModel: ObservableObject {
             if let step {
                 handleThinkingStep(step)
             }
+        case .toolStarted(let toolName, let description):
+            let step = ThinkingStep(
+                id: UUID().uuidString, description: description,
+                status: .running, toolName: toolName,
+                timestamp: ISO8601DateFormatter().string(from: Date()))
+            handleThinkingStep(step)
+            currentShimmerLabel = description
+        case .toolCompleted(let toolName, let success, let summary):
+            let step = ThinkingStep(
+                id: UUID().uuidString, description: summary,
+                status: success ? .done : .error, toolName: toolName,
+                timestamp: ISO8601DateFormatter().string(from: Date()))
+            handleThinkingStep(step)
+        case .cardCreated(let cardDict):
+            handleCardCreated(cardDict)
         case .approvalRequested:
             break // handled elsewhere
         case .unknown:
@@ -177,6 +193,24 @@ final class ChatViewModel: ObservableObject {
             thinkingSteps[index] = step
         } else {
             thinkingSteps.append(step)
+        }
+    }
+
+    // MARK: - Card decoding
+
+    private func handleCardCreated(_ cardDict: [String: AnyCodable]) {
+        do {
+            let jsonData = try JSONEncoder().encode(cardDict)
+            let anyCard = try JSONDecoder().decode(AnyCard.self, from: jsonData)
+            let cardMessage = ChatMessage(role: .assistant, content: "", card: anyCard)
+            messages.append(cardMessage)
+            persistMessages()
+        } catch {
+            log("Failed to decode card: \(error)")
+            if let raw = try? JSONEncoder().encode(cardDict),
+               let str = String(data: raw, encoding: .utf8) {
+                log("Raw card payload: \(str)")
+            }
         }
     }
 

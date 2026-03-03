@@ -16,9 +16,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import anthropic
+import httpx
 
 from server.agent.config import AgentConfig
 from server.agent.context_builder import ContextBuilder
@@ -36,6 +40,114 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 50_000
 MAX_RETRIES = 3
+
+
+# ── Fallback response types (duck-type compatible with anthropic.types.Message) ──
+
+@dataclass
+class FallbackTextBlock:
+    type: str = "text"
+    text: str = ""
+    def model_dump(self) -> dict:
+        return {"type": self.type, "text": self.text}
+
+@dataclass
+class FallbackToolUseBlock:
+    type: str = "tool_use"
+    id: str = ""
+    name: str = ""
+    input: dict = field(default_factory=dict)
+    def model_dump(self) -> dict:
+        return {"type": self.type, "id": self.id, "name": self.name, "input": self.input}
+
+@dataclass
+class FallbackMessage:
+    content: list = field(default_factory=list)
+    stop_reason: str = "end_turn"
+
+
+# ── Anthropic ↔ OpenAI format conversion ─────────────────────
+
+def _to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
+    """Convert Anthropic message format to OpenAI format."""
+    result: list[dict] = []
+    if system:
+        result.append({"role": "system", "content": system})
+
+    for msg in messages:
+        role = msg["role"]
+        content = msg["content"]
+
+        if isinstance(content, str):
+            result.append({"role": role, "content": content})
+            continue
+
+        if not isinstance(content, list):
+            result.append({"role": role, "content": str(content)})
+            continue
+
+        # Handle list content (Anthropic format)
+        if role == "assistant":
+            text_parts = []
+            tool_calls = []
+            for block in content:
+                if block.get("type") == "text":
+                    text_parts.append(block["text"])
+                elif block.get("type") == "tool_use":
+                    tool_calls.append({
+                        "id": block["id"],
+                        "type": "function",
+                        "function": {
+                            "name": block["name"],
+                            "arguments": json.dumps(block.get("input", {})),
+                        },
+                    })
+            msg_out: dict[str, Any] = {"role": "assistant", "content": "\n".join(text_parts) or None}
+            if tool_calls:
+                msg_out["tool_calls"] = tool_calls
+            result.append(msg_out)
+
+        elif role == "user":
+            # Check for tool_result blocks
+            has_tool_results = any(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in content
+            )
+            if has_tool_results:
+                for block in content:
+                    if block.get("type") == "tool_result":
+                        result.append({
+                            "role": "tool",
+                            "tool_call_id": block["tool_use_id"],
+                            "content": block.get("content", ""),
+                        })
+                    elif block.get("type") == "text":
+                        result.append({"role": "user", "content": block["text"]})
+            else:
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(block["text"])
+                    elif isinstance(block, str):
+                        text_parts.append(block)
+                result.append({"role": "user", "content": "\n".join(text_parts)})
+
+    return result
+
+
+def _to_openai_tools(tools: list[dict]) -> list[dict]:
+    """Convert Anthropic tool definitions to OpenAI format."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+            },
+        }
+        for t in tools
+    ]
 
 
 # ── Schema conversion ────────────────────────────────────────
@@ -186,6 +298,15 @@ class Agent:
             # 1. Signal start
             await self.gateway.stream_lifecycle("start", run_id, session_id)
 
+            # Track this run as a task for the iOS Tasks tab
+            task_id = run_id
+            await self.gateway.emit_task_update(task_id, "executing", step={
+                "id": uuid.uuid4().hex[:8],
+                "description": user_message[:100],
+                "status": "running",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
             # 2. Build context
             system_prompt = self.context_builder.build_system_prompt(
                 memory_query=user_message,
@@ -239,7 +360,7 @@ class Agent:
 
                 # Execute tool calls
                 tool_results = await self._process_tool_calls(
-                    final_message, session_id,
+                    final_message, session_id, task_id,
                 )
 
                 # Append tool results as user message
@@ -261,6 +382,12 @@ class Agent:
 
         finally:
             self._active_runs.pop(run_id, None)
+            await self.gateway.emit_task_update(task_id, "completed", step={
+                "id": uuid.uuid4().hex[:8],
+                "description": "Task completed",
+                "status": "done",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
             await self.gateway.stream_lifecycle("end", run_id, session_id)
 
     # ── Claude API calls ──────────────────────────────────────
@@ -294,15 +421,18 @@ class Agent:
         tools: list[dict],
         session_id: str,
         run_id: str,
-    ) -> Optional[anthropic.types.Message]:
-        """Call Claude with retry logic for rate limits, server errors, connection errors."""
+    ) -> Optional[Any]:
+        """Call Claude with retry logic. Falls back to OpenRouter if all retries fail."""
+        last_error: Exception | None = None
+
         for attempt in range(MAX_RETRIES + 1):
             try:
                 return await self._call_claude_streaming(
                     system, messages, tools, session_id, run_id,
                 )
 
-            except anthropic.RateLimitError:
+            except anthropic.RateLimitError as e:
+                last_error = e
                 if attempt < MAX_RETRIES:
                     wait = min(2 ** attempt, 16)
                     logger.warning(
@@ -311,45 +441,145 @@ class Agent:
                     await asyncio.sleep(wait)
                 else:
                     logger.error("Rate limited after %d retries", MAX_RETRIES)
-                    await self.gateway.stream_text(
-                        "\n\nRate limited by Claude API. Please try again in a moment.",
-                        session_id,
-                    )
-                    return None
 
-            except anthropic.InternalServerError:
+            except (anthropic.InternalServerError, anthropic.OverloadedError) as e:
+                last_error = e
                 if attempt < 1:
-                    logger.warning("Server error, retrying in 2s")
+                    logger.warning("Server/overloaded error, retrying in 2s: %s", type(e).__name__)
                     await asyncio.sleep(2)
                 else:
-                    logger.error("Claude API server error after retry")
-                    await self.gateway.stream_text(
-                        "\n\nClaude API server error. Please try again.",
-                        session_id,
-                    )
-                    return None
+                    logger.error("Server/overloaded error after retry: %s", type(e).__name__)
 
             except anthropic.APIConnectionError as e:
+                last_error = e
                 if attempt < 1:
                     logger.warning("Connection error, retrying in 1s: %s", e)
                     await asyncio.sleep(1)
                 else:
                     logger.error("Connection error after retry: %s", e)
-                    await self.gateway.stream_text(
-                        "\n\nConnection error reaching Claude. Please try again.",
-                        session_id,
-                    )
-                    return None
 
             except anthropic.APIStatusError as e:
+                last_error = e
                 logger.error("Claude API error: %d %s", e.status_code, e.message)
+                break  # Non-retryable, fall through to OpenRouter
+
+        # All Anthropic retries failed — try OpenRouter fallback
+        if self.config.openrouter_api_key:
+            logger.info("Falling back to OpenRouter (model: %s)", self.config.openrouter_model)
+            try:
+                return await self._call_openrouter_streaming(
+                    system, messages, tools, session_id, run_id,
+                )
+            except Exception as e:
+                logger.error("OpenRouter fallback also failed: %s", e)
                 await self.gateway.stream_text(
-                    f"\n\nAPI error: {e.message}. Please try again.",
+                    "\n\nBoth Claude and OpenRouter are unavailable. Please try again later.",
                     session_id,
                 )
                 return None
 
-        return None  # Should not reach here
+        # No fallback configured — report the original error
+        error_msg = str(last_error) if last_error else "Unknown error"
+        await self.gateway.stream_text(
+            f"\n\nClaude API error: {error_msg}. Please try again.",
+            session_id,
+        )
+        return None
+
+    # ── OpenRouter fallback ────────────────────────────────────
+
+    async def _call_openrouter_streaming(
+        self,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+        session_id: str,
+        run_id: str,
+    ) -> FallbackMessage:
+        """Call OpenRouter via httpx. Converts Anthropic→OpenAI format, streams SSE."""
+        openai_messages = _to_openai_messages(system, messages)
+        openai_tools = _to_openai_tools(tools) if tools else None
+
+        body: dict[str, Any] = {
+            "model": self.config.openrouter_model,
+            "messages": openai_messages,
+            "max_tokens": self.config.max_tokens,
+            "stream": True,
+        }
+        if openai_tools:
+            body["tools"] = openai_tools
+
+        headers = {
+            "Authorization": f"Bearer {self.config.openrouter_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        collected_text = ""
+        collected_tool_calls: dict[int, dict] = {}
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            async with client.stream(
+                "POST",
+                "https://openrouter.ai/api/v1/chat/completions",
+                json=body,
+                headers=headers,
+            ) as response:
+                if response.status_code != 200:
+                    error_body = await response.aread()
+                    raise RuntimeError(f"OpenRouter {response.status_code}: {error_body.decode()}")
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+
+                    # Stream text
+                    if delta.get("content"):
+                        collected_text += delta["content"]
+                        await self.gateway.stream_text(delta["content"], session_id)
+
+                    # Collect tool calls
+                    for tc in delta.get("tool_calls", []):
+                        idx = tc.get("index", 0)
+                        if idx not in collected_tool_calls:
+                            collected_tool_calls[idx] = {"id": tc.get("id", f"call_{uuid.uuid4().hex[:8]}"), "name": "", "arguments": ""}
+                        if tc.get("id"):
+                            collected_tool_calls[idx]["id"] = tc["id"]
+                        fn = tc.get("function", {})
+                        if fn.get("name"):
+                            collected_tool_calls[idx]["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            collected_tool_calls[idx]["arguments"] += fn["arguments"]
+
+        # Build FallbackMessage
+        content: list[Any] = []
+        if collected_text:
+            content.append(FallbackTextBlock(text=collected_text))
+
+        stop_reason = "end_turn"
+        if collected_tool_calls:
+            stop_reason = "tool_use"
+            for tc in collected_tool_calls.values():
+                try:
+                    input_data = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                except json.JSONDecodeError:
+                    input_data = {}
+                content.append(FallbackToolUseBlock(
+                    id=tc["id"], name=tc["name"], input=input_data,
+                ))
+
+        return FallbackMessage(content=content, stop_reason=stop_reason)
 
     # ── Tool execution ────────────────────────────────────────
 
@@ -357,6 +587,7 @@ class Agent:
         self,
         final_message: anthropic.types.Message,
         session_id: str,
+        task_id: str = "",
     ) -> list[dict[str, Any]]:
         """Process all tool_use blocks from a Claude response."""
         tool_results: list[dict[str, Any]] = []
@@ -420,11 +651,23 @@ class Agent:
                 "done" if result.success else "error", session_id,
             )
 
+            # Emit task step update for the iOS Tasks tab
+            if task_id:
+                await self.gateway.emit_task_update(task_id, "executing", step={
+                    "id": uuid.uuid4().hex[:8],
+                    "description": summary,
+                    "status": "done" if result.success else "error",
+                    "toolName": tool_name,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
             # If tool produced a card, emit it
             if tool_name == "create_card" and result.success and result.output:
                 try:
                     card = result.output if isinstance(result.output, dict) else json.loads(result.output)
                     await self.gateway.emit_card(card)
+                    if task_id:
+                        await self.gateway.emit_task_update(task_id, "executing", card=card)
                 except (json.JSONDecodeError, TypeError):
                     pass
 

@@ -112,7 +112,7 @@ final class WebSocketService: ObservableObject, WebSocketServiceProtocol {
             method: "chat.send",
             id: UUID().uuidString,
             payload: [
-                "message": AnyCodable(text),
+                "text": AnyCodable(text),
                 "idempotencyKey": AnyCodable(UUID().uuidString),
             ]
         )
@@ -336,7 +336,7 @@ final class MockWebSocketService: WebSocketServiceProtocol {
             method: "chat.send",
             id: UUID().uuidString,
             payload: [
-                "message": AnyCodable(text),
+                "text": AnyCodable(text),
                 "idempotencyKey": AnyCodable(UUID().uuidString),
             ]
         )

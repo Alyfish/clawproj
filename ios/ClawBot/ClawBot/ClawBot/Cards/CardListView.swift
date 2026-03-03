@@ -33,6 +33,8 @@ struct CardListView: View {
             PickCardView(card: pick)
         case .doc(let doc):
             DocCardView(card: doc)
+        case .base(let base):
+            GenericCardView(card: base)
         }
     }
 
@@ -102,6 +104,8 @@ struct CardListWithSwipeView: View {
             PickCardView(card: pick)
         case .doc(let doc):
             DocCardView(card: doc)
+        case .base(let base):
+            GenericCardView(card: base)
         }
     }
 }

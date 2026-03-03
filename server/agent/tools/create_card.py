@@ -40,6 +40,10 @@ class CreateCardTool(BaseTool):
     ) -> None:
         self._gateway_client = gateway_client
 
+    def set_gateway_client(self, client: Any) -> None:
+        """Wire gateway client after initialization."""
+        self._gateway_client = client
+
     @property
     def name(self) -> str:
         return "create_card"
@@ -74,8 +78,12 @@ class CreateCardTool(BaseTool):
             },
             "metadata": {
                 "type": "object",
-                "required": True,
-                "description": "Domain-specific fields defined by skill instructions",
+                "required": False,
+                "description": (
+                    "Fallback key-value metadata for custom card types. "
+                    "For typed cards (flight, house, pick, doc), prefer passing "
+                    "domain-specific fields as separate top-level parameters instead."
+                ),
             },
             "actions": {
                 "type": "array",
@@ -144,12 +152,20 @@ class CreateCardTool(BaseTool):
         if ranking is not None:
             card["ranking"] = ranking
 
-        # Emit to gateway if available
-        if self._gateway_client is not None:
-            try:
-                await self._gateway_client.emit_event("card/created", card)
-            except Exception as e:
-                logger.warning("Failed to emit card/created: %s", e)
+        # Merge extra kwargs to root — typed card fields (airline, route, etc.)
+        # must be at root level for iOS typed decoders (FlightCard, HouseCard, etc.)
+        for key, value in kwargs.items():
+            if key not in card:
+                card[key] = value
+
+        # For typed cards, also promote metadata keys to root so iOS decoders find them
+        _TYPED_CARD_TYPES = {"flight", "house", "pick", "doc"}
+        if type in _TYPED_CARD_TYPES and metadata:
+            for key, value in metadata.items():
+                if key not in card:
+                    card[key] = value
+
+        # Card emission handled by agent.py after tool execution — not here.
 
         logger.info("Created card: type=%s id=%s", type, card["id"])
         return self.success(card)

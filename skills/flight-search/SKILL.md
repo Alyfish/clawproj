@@ -1,7 +1,7 @@
 ---
 name: flight-search
 description: Search for flights across providers, compare prices, rank by preferences, monitor for price drops.
-tools: [http_request, code_execution, create_card, save_memory, request_approval]
+tools: [http_request, browser, code_execution, create_card, save_memory, request_approval]
 approval_actions: [pay, submit]
 version: "1.0.0"
 author: ClawBot
@@ -72,13 +72,14 @@ Tool: http_request
 }
 ```
 
-### Credential Check
+### Credential Check & Data Source Priority
 
-Before searching, check which credentials are available:
+Before searching, check which data source to use:
 
-1. Check if `amadeus` credential exists -> use Amadeus API
-2. Else check if `serpapi` credential exists -> use SerpAPI
-3. Else -> use Mock Mode (generate demo results)
+1. Check if `amadeus` credential exists → use Amadeus API (best data)
+2. Else check if `serpapi` credential exists → use SerpAPI
+3. Else → use **Browser Mode** (scrape Google Flights / Kayak for real data)
+4. If browser also fails (anti-bot, CAPTCHA) → use Mock Mode (demo only)
 
 
 ## API: Amadeus Flight Offers Search (Primary)
@@ -445,9 +446,137 @@ When the agent periodically checks watches (or user asks "any price drops?"):
 5. Update the memory entry with new price and timestamp
 
 
+## Browser Mode (Fallback — No API Keys Needed)
+
+When neither `amadeus` nor `serpapi` credentials are available, use the `browser` tool to scrape real flight data from public sites. This provides real results without any API keys.
+
+### Site Priority
+
+Try these in order. If one fails (CAPTCHA, blocked, no results), try the next:
+
+1. **Google Flights** (best coverage, complex page)
+2. **Kayak** (cleaner URLs, good fallback)
+
+### Strategy: Google Flights
+
+**Step 1: Navigate with search query**
+
+```
+Tool: browser
+{
+  "action": "navigate",
+  "params": {"url": "https://www.google.com/travel/flights?q=flights+from+{ORIGIN}+to+{DEST}+on+{DATE}"}
+}
+```
+
+Replace `{ORIGIN}`, `{DEST}`, `{DATE}` with the actual values. Example:
+`https://www.google.com/travel/flights?q=flights+from+SFO+to+LHR+on+March+15`
+
+**Step 2: Wait for results to load**
+
+```
+Tool: browser
+{
+  "action": "wait_for_selector",
+  "params": {"selector": "[role='listitem']", "timeout": 15000}
+}
+```
+
+If wait_for_selector fails, proceed to get_page_content anyway — some content may have loaded.
+
+**Step 3: Extract page content**
+
+```
+Tool: browser
+{
+  "action": "get_page_content",
+  "params": {}
+}
+```
+
+**Step 4: Parse flight data**
+
+Use `code_execution` to parse the text output. Google Flights text typically shows flights in blocks with airline, times, duration, stops, and price.
+
+```python
+Tool: code_execution
+{
+  "language": "python",
+  "code": "import re, json\n\npage_text = '''<paste page content here>'''\n\nflights = []\nlines = [l.strip() for l in page_text.split('\\n') if l.strip()]\n\n# Google Flights typically shows blocks like:\n# \"United\"\n# \"6:00 AM – 2:30 PM+1\"\n# \"10h 30m\"\n# \"Nonstop\" or \"1 stop\" or \"2 stops\"\n# \"$489\"\n\nprice_pattern = r'\\$([\\d,]+)'\ntime_pattern = r'(\\d{1,2}:\\d{2}\\s*[AP]M)\\s*[–-]\\s*(\\d{1,2}:\\d{2}\\s*[AP]M)'\nduration_pattern = r'(\\d+h(?:\\s*\\d+m)?)'\nstops_pattern = r'(Nonstop|\\d+\\s*stop)'\n\ncurrent = {}\nfor line in lines:\n    price_match = re.search(price_pattern, line)\n    time_match = re.search(time_pattern, line)\n    dur_match = re.search(duration_pattern, line)\n    stops_match = re.search(stops_pattern, line, re.IGNORECASE)\n    \n    if price_match and current:\n        current['price'] = int(price_match.group(1).replace(',', ''))\n        flights.append(current)\n        current = {}\n    elif time_match:\n        current['depart_time'] = time_match.group(1)\n        current['arrive_time'] = time_match.group(2)\n    elif dur_match:\n        current['duration'] = dur_match.group(1)\n    elif stops_match:\n        stop_text = stops_match.group(1)\n        current['stops'] = 0 if 'nonstop' in stop_text.lower() else int(re.search(r'\\d+', stop_text).group())\n\nprint(json.dumps(flights[:15], indent=2))"
+}
+```
+
+**IMPORTANT:** The parsing code above is a template. Google Flights page format varies. Always inspect the `get_page_content` output first and adapt the parsing regex accordingly. The LLM should reason about the actual text structure returned.
+
+**Step 5: Scroll for more results (if needed)**
+
+```
+Tool: browser
+{
+  "action": "scroll",
+  "params": {"direction": "down", "amount": 1500}
+}
+```
+
+Then call `get_page_content` again to capture additional results.
+
+### Strategy: Kayak (Fallback)
+
+If Google Flights fails (CAPTCHA, blocked, no results):
+
+**Step 1: Navigate with direct URL**
+
+```
+Tool: browser
+{
+  "action": "navigate",
+  "params": {"url": "https://www.kayak.com/flights/{ORIGIN}-{DEST}/{DATE}?sort=bestflight_a"}
+}
+```
+
+Example: `https://www.kayak.com/flights/SFO-LHR/2025-03-15?sort=bestflight_a`
+
+For round-trip: `https://www.kayak.com/flights/SFO-LHR/2025-03-15/2025-03-22?sort=bestflight_a`
+
+**Step 2-4:** Same pipeline — `wait_for_selector` → `get_page_content` → `code_execution` parse.
+
+Kayak text typically shows: airline, depart/arrive times, duration, stops, price — similar to Google Flights but with slightly different formatting.
+
+### Card Mapping from Browser Results
+
+Map parsed fields to FlightCard format:
+
+| Parsed Field | FlightCard Field |
+|-------------|-----------------|
+| airline name | `airline` |
+| depart_time / arrive_time | `departure` / `arrival` (combine with search date) |
+| duration | `duration` |
+| stops count | `layovers` |
+| price | `price.amount` |
+
+Set `source` to `"Google Flights (browser)"` or `"Kayak (browser)"`.
+
+Fields not available via browser scraping:
+- `pointsValue` — set to null
+- `baggage` — set to "Check airline website"
+- `refundPolicy` — set to "Check airline website"
+- `metadata.aircraft` — not available
+
+### Anti-Bot Handling
+
+1. If Google Flights shows CAPTCHA → skip, try Kayak
+2. If Kayak is blocked → fall through to Mock Mode
+3. If both fail, tell user: "Browser scraping is currently blocked. Showing demo results. Add Amadeus or SerpAPI credential for live data."
+
+### Browser Source Attribution
+
+When presenting browser-scraped results, add:
+> **Data via {source}** — Showing flights from {Google Flights/Kayak}. For more detailed data (baggage, refund policy, points value), add an Amadeus credential: set `CLAWBOT_CRED_AMADEUS` env var.
+
+
 ## Mock Mode
 
-When neither `amadeus` nor `serpapi` credentials are available, generate realistic demo results.
+When neither API credentials nor browser scraping produce results, generate realistic demo data.
 
 ### How to Detect Mock Mode
 

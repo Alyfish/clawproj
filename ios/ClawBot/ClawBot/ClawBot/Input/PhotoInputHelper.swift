@@ -1,6 +1,7 @@
 import SwiftUI
 import PhotosUI
 import Foundation
+import Observation
 
 // DESIGN DECISION: Images are sent as base64 via WebSocket in a 'vision.extract'
 // request payload. This avoids adding a separate HTTP upload endpoint for MVP.
@@ -23,11 +24,12 @@ enum PhotoUploadState: Equatable {
 
 /// Manages photo selection, compression, and sending to the gateway.
 @MainActor
-class PhotoInputHelper: ObservableObject {
+@Observable
+class PhotoInputHelper {
 
-    @Published var selectedItem: PhotosPickerItem?
-    @Published var uploadState: PhotoUploadState = .idle
-    @Published var previewImage: Image?
+    var selectedItem: PhotosPickerItem?
+    var uploadState: PhotoUploadState = .idle
+    var previewImage: Image?
 
     private let webSocket: any WebSocketServiceProtocol
     private let maxImageBytes = 2 * 1024 * 1024  // 2MB after compression
@@ -160,7 +162,7 @@ class PhotoInputHelper: ObservableObject {
 /// SwiftUI view component with photo picker button and upload status.
 /// Drop this into the chat input bar or wherever photo input is needed.
 struct PhotoInputView: View {
-    @ObservedObject var helper: PhotoInputHelper
+    @Bindable var helper: PhotoInputHelper
     @State private var showPicker = false
 
     var body: some View {
