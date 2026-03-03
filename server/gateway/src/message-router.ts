@@ -25,6 +25,21 @@ const TaskStopSchema = z.object({
   taskId: z.string(),
 });
 
+const LoginInputSchema = z.object({
+  profile: z.string().min(1),
+  ref: z.number().int().min(0),
+  text: z.string(),
+});
+
+const LoginClickSchema = z.object({
+  profile: z.string().min(1),
+  ref: z.number().int().min(0),
+});
+
+const LoginDoneSchema = z.object({
+  profile: z.string().min(1),
+});
+
 const WSMessageSchema = z.object({
   type: z.enum(['req', 'res', 'event']),
   id: z.string().optional(),
@@ -123,6 +138,15 @@ export default class MessageRouter {
         break;
       case 'task.stop':
         this.handleTaskStop(client, msg);
+        break;
+      case 'login.input':
+        this.handleLoginInput(client, msg);
+        break;
+      case 'login.click':
+        this.handleLoginClick(client, msg);
+        break;
+      case 'login.done':
+        this.handleLoginDone(client, msg);
         break;
       default:
         this.sendError(
@@ -309,6 +333,129 @@ export default class MessageRouter {
     });
   }
 
+  // ── login.input ──────────────────────────────────────────
+
+  private handleLoginInput(client: ConnectedClient, msg: WSMessage): void {
+    const result = LoginInputSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid login.input payload: ${result.error.message}`,
+      );
+      return;
+    }
+
+    const agentNode = this.findAgentNode(client.sessionId);
+    if (!agentNode) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.NO_AGENT,
+        'No agent node connected to this session',
+      );
+      return;
+    }
+
+    // Forward to agent
+    this.sendTo(agentNode.ws, {
+      type: 'event',
+      event: 'login/input',
+      payload: { ...result.data, sessionId: client.sessionId },
+    });
+
+    // Respond to operator
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'login.input',
+      payload: { status: 'sent' },
+    });
+  }
+
+  // ── login.click ──────────────────────────────────────────
+
+  private handleLoginClick(client: ConnectedClient, msg: WSMessage): void {
+    const result = LoginClickSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid login.click payload: ${result.error.message}`,
+      );
+      return;
+    }
+
+    const agentNode = this.findAgentNode(client.sessionId);
+    if (!agentNode) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.NO_AGENT,
+        'No agent node connected to this session',
+      );
+      return;
+    }
+
+    // Forward to agent
+    this.sendTo(agentNode.ws, {
+      type: 'event',
+      event: 'login/click',
+      payload: { ...result.data, sessionId: client.sessionId },
+    });
+
+    // Respond to operator
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'login.click',
+      payload: { status: 'sent' },
+    });
+  }
+
+  // ── login.done ───────────────────────────────────────────
+
+  private handleLoginDone(client: ConnectedClient, msg: WSMessage): void {
+    const result = LoginDoneSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid login.done payload: ${result.error.message}`,
+      );
+      return;
+    }
+
+    const agentNode = this.findAgentNode(client.sessionId);
+    if (!agentNode) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.NO_AGENT,
+        'No agent node connected to this session',
+      );
+      return;
+    }
+
+    // Forward to agent
+    this.sendTo(agentNode.ws, {
+      type: 'event',
+      event: 'login/done',
+      payload: { ...result.data, sessionId: client.sessionId },
+    });
+
+    // Respond to operator
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'login.done',
+      payload: { status: 'sent' },
+    });
+  }
+
   // ── Event handling (from node clients) ───────────────────
 
   private handleEvent(client: ConnectedClient, msg: WSMessage): void {
@@ -337,6 +484,11 @@ export default class MessageRouter {
 
     // Broadcast to all operators in the session
     this.broadcastToOperators(client.sessionId, msg);
+
+    // Skip history for ephemeral browser login frames (~80KB each)
+    if ((msg.event ?? '').startsWith('browser/login:')) {
+      return;
+    }
 
     // Store in history
     const historyEntry: MessageHistoryEntry = {

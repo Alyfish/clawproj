@@ -13,16 +13,162 @@ import type { Page, Locator } from 'playwright';
 import { SessionManager } from './sessions.js';
 import { CheckpointDetector } from './checkpoint.js';
 import type { CheckpointResult } from './checkpoint.js';
+import {
+  snapshotAction,
+  clickRefAction,
+  typeRefAction,
+  selectRefAction,
+} from './snapshot.js';
+import dns from 'node:dns';
+import net from 'node:net';
+import { promisify } from 'node:util';
+
+const dnsLookupAll = promisify(dns.resolve);
 
 // ============================================================
 // CONSTANTS
 // ============================================================
 
-const NAVIGATE_TIMEOUT = 30_000;
+const NAVIGATE_TIMEOUT = 60_000;
 const CLICK_TIMEOUT = 10_000;
 const MAX_CONTENT_LENGTH = 50_000;
 const MAX_SEARCH_RESULTS = 10;
 const POST_ACTION_WAIT = 1_000;
+
+// ============================================================
+// SSRF PROTECTION (defense-in-depth — Python layer is primary)
+// ============================================================
+
+const ALLOWED_PORTS = new Set([80, 443, 8080, 8443]);
+
+const BLOCKED_HOSTNAMES = new Set([
+  'localhost',
+  'localhost.localdomain',
+  '0.0.0.0',
+  'metadata.google.internal',
+  'metadata.internal',
+  'kubernetes.default.svc',
+]);
+
+const BLOCKED_HOSTNAME_SUFFIXES = ['.local', '.internal', '.localhost'];
+
+interface SSRFCheckResult {
+  allowed: boolean;
+  reason: string;
+}
+
+function isBlockedIP(ip: string): boolean {
+  // Parse octets for IPv4
+  const parts = ip.split('.').map(Number);
+  if (parts.length === 4 && parts.every((p) => p >= 0 && p <= 255)) {
+    const [a, b] = parts;
+    if (a === 10) return true; // 10.0.0.0/8
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+    if (a === 192 && b === 168) return true; // 192.168.0.0/16
+    if (a === 127) return true; // 127.0.0.0/8
+    if (a === 169 && b === 254) return true; // 169.254.0.0/16
+    if (a === 0) return true; // 0.0.0.0/8
+    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10
+    if (a >= 224 && a <= 239) return true; // 224.0.0.0/4
+    if (a >= 240) return true; // 240.0.0.0/4
+    return false;
+  }
+
+  // IPv6 checks
+  const lower = ip.toLowerCase();
+  if (lower === '::1') return true;
+  if (lower.startsWith('fe80:')) return true;
+  if (lower.startsWith('fc') || lower.startsWith('fd')) return true;
+
+  return false;
+}
+
+function checkSSRFSync(url: string): SSRFCheckResult {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { allowed: false, reason: 'Malformed URL' };
+  }
+
+  const scheme = parsed.protocol.replace(':', '');
+  if (scheme !== 'http' && scheme !== 'https') {
+    return { allowed: false, reason: `Blocked scheme: ${scheme}` };
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (!hostname) {
+    return { allowed: false, reason: 'Missing hostname' };
+  }
+
+  if (BLOCKED_HOSTNAMES.has(hostname)) {
+    return { allowed: false, reason: `Blocked hostname: ${hostname}` };
+  }
+
+  for (const suffix of BLOCKED_HOSTNAME_SUFFIXES) {
+    if (hostname.endsWith(suffix)) {
+      return {
+        allowed: false,
+        reason: `Blocked hostname pattern: ${hostname}`,
+      };
+    }
+  }
+
+  const port = parsed.port
+    ? parseInt(parsed.port, 10)
+    : scheme === 'https'
+      ? 443
+      : 80;
+  if (!ALLOWED_PORTS.has(port)) {
+    return { allowed: false, reason: `Blocked port: ${port}` };
+  }
+
+  if (net.isIP(hostname)) {
+    if (isBlockedIP(hostname)) {
+      return { allowed: false, reason: `Blocked IP: ${hostname}` };
+    }
+  }
+
+  return { allowed: true, reason: 'OK' };
+}
+
+async function checkSSRF(url: string): Promise<SSRFCheckResult> {
+  const syncResult = checkSSRFSync(url);
+  if (!syncResult.allowed) return syncResult;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { allowed: false, reason: 'Malformed URL' };
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+
+  // If raw IP, sync check already handled it
+  if (net.isIP(hostname)) return syncResult;
+
+  // DNS resolution check
+  try {
+    const addresses = (await promisify(dns.lookup)(hostname, {
+      all: true,
+    })) as dns.LookupAddress[];
+    for (const addr of addresses) {
+      if (isBlockedIP(addr.address)) {
+        log('warn', 'ssrf:dns_blocked', { hostname, resolvedIP: addr.address });
+        return {
+          allowed: false,
+          reason: `Hostname ${hostname} resolves to blocked IP: ${addr.address}`,
+        };
+      }
+    }
+  } catch {
+    log('warn', 'ssrf:dns_failed', { hostname });
+    return { allowed: false, reason: `DNS resolution failed: ${hostname}` };
+  }
+
+  return { allowed: true, reason: 'OK' };
+}
 
 const SEARCH_INPUT_STRATEGIES: readonly string[] = [
   'input[type="search"]',
@@ -71,7 +217,11 @@ type BrowserAction =
   | 'take_screenshot'
   | 'get_page_content'
   | 'wait_for_selector'
-  | 'scroll';
+  | 'scroll'
+  | 'snapshot'
+  | 'click_ref'
+  | 'type_ref'
+  | 'select_ref';
 
 // ============================================================
 // ACTION EXECUTOR
@@ -145,6 +295,14 @@ export class ActionExecutor {
       get_page_content: (p, pr) => this.getPageContent(p, pr),
       wait_for_selector: (p, pr) => this.waitForSelector(p, pr),
       scroll: (p, pr) => this.scroll(p, pr),
+      snapshot: (p, pr) =>
+        snapshotAction(p, pr, (pg) => this.captureScreenshot(pg)),
+      click_ref: (p, pr) =>
+        clickRefAction(p, pr, (pg) => this.captureScreenshot(pg)),
+      type_ref: (p, pr) =>
+        typeRefAction(p, pr, (pg) => this.captureScreenshot(pg)),
+      select_ref: (p, pr) =>
+        selectRefAction(p, pr, (pg) => this.captureScreenshot(pg)),
     };
 
     const handler = dispatch[action as BrowserAction];
@@ -212,13 +370,15 @@ export class ActionExecutor {
       };
     }
 
-    if (!this.isValidUrl(url)) {
+    // SSRF check (defense-in-depth — Python layer is primary)
+    const ssrfResult = await checkSSRF(url);
+    if (!ssrfResult.allowed) {
       const screenshot = await this.captureScreenshot(page);
       return {
         success: false,
         result: null,
         screenshot,
-        error: 'Invalid URL scheme. Only http:// and https:// are allowed.',
+        error: `Blocked: ${ssrfResult.reason}`,
       };
     }
 
@@ -238,6 +398,21 @@ export class ActionExecutor {
       } else {
         throw err;
       }
+    }
+
+    // Post-redirect SSRF check
+    const finalUrl = page.url();
+    const postRedirectCheck = await checkSSRF(finalUrl);
+    if (!postRedirectCheck.allowed) {
+      log('warn', 'ssrf:post_redirect_blocked', { originalUrl: url, finalUrl });
+      await page.goto('about:blank');
+      const screenshot = await this.captureScreenshot(page);
+      return {
+        success: false,
+        result: null,
+        screenshot,
+        error: `Blocked after redirect: ${postRedirectCheck.reason}`,
+      };
     }
 
     const screenshot = await this.captureScreenshot(page);
@@ -269,14 +444,15 @@ export class ActionExecutor {
       };
     }
 
-    if (!this.isValidUrl(site)) {
+    // SSRF check (defense-in-depth)
+    const ssrfResult = await checkSSRF(site);
+    if (!ssrfResult.allowed) {
       const screenshot = await this.captureScreenshot(page);
       return {
         success: false,
         result: null,
         screenshot,
-        error:
-          'Invalid site URL scheme. Only http:// and https:// are allowed.',
+        error: `Blocked: ${ssrfResult.reason}`,
       };
     }
 
@@ -795,9 +971,5 @@ export class ActionExecutor {
     return (
       text.slice(0, maxLength) + `\n... [truncated, ${text.length} total chars]`
     );
-  }
-
-  private isValidUrl(url: string): boolean {
-    return /^https?:\/\//i.test(url.trim());
   }
 }

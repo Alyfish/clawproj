@@ -74,6 +74,35 @@ export interface MemoryUpdatedEvent {
   payload: { key: string; operation: 'set' | 'delete' };
 }
 
+// ── Browser login flow events (ephemeral — not persisted) ──
+
+export interface BrowserLoginFrameEvent {
+  event: 'browser/login:frame';
+  payload: {
+    imageBase64: string;
+    url: string;
+    profile: string;
+    pageTitle: string;
+    timestamp: string;
+    elements: Array<{
+      ref: number;
+      tag: string;
+      type: string | null;
+      text: string;
+      rect: { x: number; y: number; w: number; h: number };
+    }>;
+  };
+}
+
+export interface LoginFlowEndEvent {
+  event: 'browser/login:end';
+  payload: {
+    profile: string;
+    authenticated: boolean;
+    domain: string;
+  };
+}
+
 export type StreamEvent =
   | StreamAssistantEvent
   | StreamLifecycleEvent
@@ -84,7 +113,9 @@ export type StreamEvent =
   | ToolEndEvent
   | SkillLoadedEvent
   | CardCreatedEvent
-  | MemoryUpdatedEvent;
+  | MemoryUpdatedEvent
+  | BrowserLoginFrameEvent
+  | LoginFlowEndEvent;
 
 // ── Client request payloads (client → server) ──────────────
 
@@ -101,4 +132,19 @@ export interface ApprovalResolvePayload {
 
 export interface TaskStopPayload {
   taskId: string;
+}
+
+export interface LoginInputPayload {
+  profile: string;
+  ref: number;
+  text: string;
+}
+
+export interface LoginClickPayload {
+  profile: string;
+  ref: number;
+}
+
+export interface LoginDonePayload {
+  profile: string;
 }

@@ -29,6 +29,9 @@ protocol WebSocketServiceProtocol: AnyObject {
     func sendChatMessage(text: String)
     func sendApprovalResponse(approvalId: String, decision: String)
     func sendTaskStop(taskId: String)
+    func sendLoginInput(profile: String, ref: Int, text: String)
+    func sendLoginClick(profile: String, ref: Int)
+    func sendLoginDone(profile: String)
 }
 
 // MARK: - WebSocketService
@@ -137,6 +140,42 @@ final class WebSocketService: ObservableObject, WebSocketServiceProtocol {
             id: UUID().uuidString,
             payload: [
                 "taskId": AnyCodable(taskId),
+            ]
+        )
+        send(message)
+    }
+
+    func sendLoginInput(profile: String, ref: Int, text: String) {
+        let message = WSMessage.request(
+            method: "login.input",
+            id: UUID().uuidString,
+            payload: [
+                "profile": AnyCodable(profile),
+                "ref": AnyCodable(ref),
+                "text": AnyCodable(text),
+            ]
+        )
+        send(message)
+    }
+
+    func sendLoginClick(profile: String, ref: Int) {
+        let message = WSMessage.request(
+            method: "login.click",
+            id: UUID().uuidString,
+            payload: [
+                "profile": AnyCodable(profile),
+                "ref": AnyCodable(ref),
+            ]
+        )
+        send(message)
+    }
+
+    func sendLoginDone(profile: String) {
+        let message = WSMessage.request(
+            method: "login.done",
+            id: UUID().uuidString,
+            payload: [
+                "profile": AnyCodable(profile),
             ]
         )
         send(message)
@@ -361,6 +400,42 @@ final class MockWebSocketService: WebSocketServiceProtocol {
             id: UUID().uuidString,
             payload: [
                 "taskId": AnyCodable(taskId),
+            ]
+        )
+        sentMessages.append(message)
+    }
+
+    func sendLoginInput(profile: String, ref: Int, text: String) {
+        let message = WSMessage.request(
+            method: "login.input",
+            id: UUID().uuidString,
+            payload: [
+                "profile": AnyCodable(profile),
+                "ref": AnyCodable(ref),
+                "text": AnyCodable(text),
+            ]
+        )
+        sentMessages.append(message)
+    }
+
+    func sendLoginClick(profile: String, ref: Int) {
+        let message = WSMessage.request(
+            method: "login.click",
+            id: UUID().uuidString,
+            payload: [
+                "profile": AnyCodable(profile),
+                "ref": AnyCodable(ref),
+            ]
+        )
+        sentMessages.append(message)
+    }
+
+    func sendLoginDone(profile: String) {
+        let message = WSMessage.request(
+            method: "login.done",
+            id: UUID().uuidString,
+            payload: [
+                "profile": AnyCodable(profile),
             ]
         )
         sentMessages.append(message)

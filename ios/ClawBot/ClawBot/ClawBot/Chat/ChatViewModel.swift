@@ -14,12 +14,14 @@ final class ChatViewModel: ObservableObject {
     @Published var connectionState: ConnectionState = .disconnected
     @Published var showThinkingSteps = false
     @Published var currentShimmerLabel: String? = nil
+    @Published var showLoginFlow = false
 
     // MARK: Dependencies
 
     private let webSocket: any WebSocketServiceProtocol
     private let messageStore: MessageStore
     private let serverURL: URL
+    let loginFlowViewModel: LoginFlowViewModel
 
     // MARK: Internal state
 
@@ -38,6 +40,7 @@ final class ChatViewModel: ObservableObject {
         self.webSocket = ws
         self.messageStore = messageStore
         self.serverURL = serverURL
+        self.loginFlowViewModel = LoginFlowViewModel(webSocket: ws)
         setupSubscriptions()
     }
 
@@ -121,6 +124,22 @@ final class ChatViewModel: ObservableObject {
             handleCardCreated(cardDict)
         case .approvalRequested:
             break // handled elsewhere
+        case .loginFrame(let imageBase64, let url, let profile, let pageTitle, let elements):
+            loginFlowViewModel.handleFrame(
+                imageBase64: imageBase64, url: url, profile: profile,
+                pageTitle: pageTitle, elements: elements
+            )
+            if !showLoginFlow {
+                showLoginFlow = true
+            }
+        case .loginFlowEnd(let profile, let authenticated, let domain):
+            loginFlowViewModel.isActive = false
+            showLoginFlow = false
+            if authenticated {
+                let msg = ChatMessage(role: .assistant, content: "Successfully logged into \(domain).")
+                messages.append(msg)
+                persistMessages()
+            }
         case .unknown:
             break
         }

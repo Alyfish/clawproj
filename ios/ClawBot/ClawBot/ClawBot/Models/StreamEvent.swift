@@ -24,6 +24,16 @@ enum StreamEvent {
     case toolCompleted(toolName: String, success: Bool, summary: String)
     /// Structured card created by agent.
     case cardCreated(card: [String: AnyCodable])
+    /// Browser login screenshot frame (ephemeral, not persisted).
+    case loginFrame(
+        imageBase64: String,
+        url: String,
+        profile: String,
+        pageTitle: String,
+        elements: [[String: AnyCodable]]
+    )
+    /// Login flow completed.
+    case loginFlowEnd(profile: String, authenticated: Bool, domain: String)
     /// Unrecognised event name — forward-compatible.
     case unknown(event: String, payload: [String: AnyCodable]?)
 
@@ -105,6 +115,37 @@ enum StreamEvent {
         case "card/created":
             guard let card = p?["card"]?.dictValue else { return nil }
             return .cardCreated(card: card.mapValues { AnyCodable($0) })
+
+        case "browser/login:frame":
+            guard
+                let imageBase64 = p?["imageBase64"]?.stringValue,
+                let url = p?["url"]?.stringValue,
+                let profile = p?["profile"]?.stringValue,
+                let pageTitle = p?["pageTitle"]?.stringValue
+            else { return nil }
+            // Elements array: each element is a dict with ref, tag, type, text, rect
+            let elements: [[String: AnyCodable]]
+            if let elemArray = p?["elements"]?.value as? [[String: Any]] {
+                elements = elemArray.map { dict in
+                    dict.mapValues { AnyCodable($0) }
+                }
+            } else {
+                elements = []
+            }
+            return .loginFrame(
+                imageBase64: imageBase64, url: url, profile: profile,
+                pageTitle: pageTitle, elements: elements
+            )
+
+        case "browser/login:end":
+            guard
+                let profile = p?["profile"]?.stringValue,
+                let domain = p?["domain"]?.stringValue
+            else { return nil }
+            let authenticated = p?["authenticated"]?.boolValue ?? false
+            return .loginFlowEnd(
+                profile: profile, authenticated: authenticated, domain: domain
+            )
 
         default:
             return .unknown(event: eventName, payload: p)

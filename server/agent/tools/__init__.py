@@ -13,8 +13,10 @@ from server.agent.tools.web_search import WebSearchTool
 from server.agent.tools.create_card import CreateCardTool
 from server.agent.tools.memory_tools import SaveMemoryTool, SearchMemoryTool
 from server.agent.tools.request_approval import RequestApprovalTool
-from server.agent.tools.browser_bridge import BrowserBridge
+from server.agent.tools.browser_cdp import CDPBrowserTool
+from server.agent.tools.profile_manager import ProfileManagerTool
 from server.agent.tools.vision import VisionTool
+from server.agent.browser_profiles import BrowserProfileManager
 from server.agent.tools.register import create_registry
 
 
@@ -34,7 +36,9 @@ def create_default_registry(**kwargs) -> ToolRegistry:
     registry.register(SaveMemoryTool(memory_system=kwargs.get("memory_system")))
     registry.register(SearchMemoryTool(memory_system=kwargs.get("memory_system")))
     registry.register(RequestApprovalTool(gateway_client=kwargs.get("gateway_client")))
-    registry.register(BrowserBridge())
+    profile_manager = BrowserProfileManager()
+    registry.register(CDPBrowserTool(profile_manager=profile_manager))
+    registry.register(ProfileManagerTool(profile_manager=profile_manager))
     registry.register(VisionTool())
     return registry
 
@@ -53,7 +57,9 @@ __all__ = [
     "SaveMemoryTool",
     "SearchMemoryTool",
     "RequestApprovalTool",
-    "BrowserBridge",
+    "CDPBrowserTool",
+    "ProfileManagerTool",
+    "BrowserProfileManager",
     "VisionTool",
     "create_default_registry",
     "create_registry",

@@ -42,6 +42,9 @@ struct ChatView: View {
                 viewModel.connect()
             }
         }
+        .sheet(isPresented: $viewModel.showLoginFlow) {
+            LoginFlowView(viewModel: viewModel.loginFlowViewModel)
+        }
     }
 
     // MARK: - Messages list

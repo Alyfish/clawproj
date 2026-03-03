@@ -1,0 +1,60 @@
+version: "3.8"
+
+services:
+  browser:
+    image: ghcr.io/browserless/chromium
+    container_name: clawbot-browser
+    ports:
+      - "3000:3000"
+    environment:
+      TOKEN: "${BROWSER_TOKEN:-clawbot-dev}"
+      ENABLE_DEBUGGER: "true"
+      DEFAULT_LAUNCH_ARGS: '["--disable-dev-shm-usage","--disable-gpu","--no-sandbox"]'
+      PREBOOT_CHROME: "true"
+      MAX_CONCURRENT_SESSIONS: "5"
+      CONNECTION_TIMEOUT: "600000"
+    volumes:
+      - browser-data:/data
+      - browser-profiles:/data/browser-profiles
+    shm_size: "2g"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/json/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      dockerfile: server/gateway/Dockerfile
+    container_name: clawbot-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      GATEWAY_PORT: "8080"
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      dockerfile: server/agent/Dockerfile
+    container_name: clawbot-agent
+    depends_on:
+      browser:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    volumes:
+      - browser-profiles:/data/browser-profiles
+    environment:
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      BROWSER_CDP_URL: "ws://browser:3000?token=${BROWSER_TOKEN:-clawbot-dev}"
+      CLAWBOT_GATEWAY_URL: "ws://gateway:8080"
+      BROWSER_PROFILES_DIR: "/data/browser-profiles"
+    restart: unless-stopped
+
+volumes:
+  browser-data:
+  browser-profiles:

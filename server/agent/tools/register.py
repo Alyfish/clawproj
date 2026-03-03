@@ -23,8 +23,10 @@ from server.agent.tools.web_search import WebSearchTool
 from server.agent.tools.create_card import CreateCardTool
 from server.agent.tools.memory_tools import SaveMemoryTool, SearchMemoryTool
 from server.agent.tools.request_approval import RequestApprovalTool
-from server.agent.tools.browser_bridge import BrowserBridge
+from server.agent.tools.browser_cdp import CDPBrowserTool
+from server.agent.tools.profile_manager import ProfileManagerTool
 from server.agent.tools.vision import VisionTool
+from server.agent.browser_profiles import BrowserProfileManager
 
 
 def create_registry(
@@ -64,8 +66,10 @@ def create_registry(
     registry.register(SaveMemoryTool(memory_system=memory_system))
     registry.register(SearchMemoryTool(memory_system=memory_system))
 
-    # Browser automation (manages its own Node.js sidecar)
-    registry.register(BrowserBridge())
+    # Browser automation with profile support
+    profile_manager = BrowserProfileManager()
+    registry.register(CDPBrowserTool(profile_manager=profile_manager))
+    registry.register(ProfileManagerTool(profile_manager=profile_manager))
 
     # Vision extraction (agentic multi-pass pipeline)
     registry.register(VisionTool())

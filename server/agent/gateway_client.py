@@ -241,6 +241,19 @@ class GatewayClient:
                             "attachments": [],
                         }
 
+                    # ── Login events from iOS ─────────────────
+                    elif msg_type == "event" and event in (
+                        "login/input", "login/click", "login/done",
+                    ):
+                        yield {
+                            "text": f"__LOGIN_{event.split('/')[1].upper()}__",
+                            "session_id": payload.get("sessionId", "default"),
+                            "message_id": str(uuid.uuid4()),
+                            "attachments": [],
+                            "login_event": event,
+                            "login_payload": payload,
+                        }
+
                     else:
                         logger.debug(
                             "Ignoring message: type=%s event=%s",
@@ -351,6 +364,20 @@ class GatewayClient:
     async def emit_card(self, card: dict) -> None:
         """Emit a card/created event to display a card on iOS."""
         await self.emit_event("card/created", {"card": card})
+
+    async def emit_login_frame(self, frame_data: dict) -> None:
+        """Emit a browser login frame (screenshot + elements). Ephemeral."""
+        await self.emit_event("browser/login:frame", frame_data)
+
+    async def emit_login_flow_end(
+        self, profile: str, authenticated: bool, domain: str,
+    ) -> None:
+        """Signal login flow completed."""
+        await self.emit_event("browser/login:end", {
+            "profile": profile,
+            "authenticated": authenticated,
+            "domain": domain,
+        })
 
     # ── Approval Flow ───────────────────────────────────────────
 
@@ -490,6 +517,15 @@ class MockGatewayClient:
         title = card.get("title", "untitled")
         card_type = card.get("type", "?")
         print(f"\n  \U0001f0cf Card: {title} ({card_type})")
+
+    async def emit_login_frame(self, frame_data: dict) -> None:
+        pass  # no-op in test mode
+
+    async def emit_login_flow_end(
+        self, profile: str, authenticated: bool, domain: str,
+    ) -> None:
+        icon = "\u2705" if authenticated else "\u274c"
+        print(f"\n  {icon} Login flow ended: {domain} (authenticated={authenticated})")
 
     async def request_approval(
         self,

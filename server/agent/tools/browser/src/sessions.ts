@@ -43,6 +43,14 @@ export class SessionManager {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--disable-notifications',
+        '--disable-geolocation',
+        '--use-fake-device-for-media-stream',
+        '--deny-permission-prompts',
+        '--disable-background-networking',
+        '--disable-extensions',
+        '--disable-sync',
+        '--no-first-run',
       ],
     });
 
@@ -95,6 +103,7 @@ export class SessionManager {
     const context = await this.browser!.newContext({
       viewport: VIEWPORT,
       ignoreHTTPSErrors: true,
+      permissions: [],
     });
 
     const page = await context.newPage();

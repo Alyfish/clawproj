@@ -61,11 +61,14 @@ class BrowserBridge(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Automate browser interactions for websites without APIs. "
-            "Use for web scraping, form filling, navigating sites, and extracting data. "
-            "Every action returns a screenshot so you can see what happened. "
+            "Browser tool for web browsing, scraping, and form interaction. "
+            "PREFERRED WORKFLOW: 1) navigate(url) 2) snapshot() — see numbered "
+            "elements 3) click_ref(N) or type_ref(N, text) — interact by number "
+            "4) snapshot() again — see the result. "
+            "Use snapshot + refs for ALL interactions. Only fall back to CSS "
+            "selectors if refs fail. "
             "IMPORTANT: Payment pages, form submissions, CAPTCHAs, and 2FA pages "
-            "require approval before proceeding — you will be notified when this happens."
+            "require approval before proceeding."
         )
 
     @property
@@ -85,6 +88,10 @@ class BrowserBridge(BaseTool):
                     "get_page_content",
                     "wait_for_selector",
                     "scroll",
+                    "snapshot",
+                    "click_ref",
+                    "type_ref",
+                    "select_ref",
                 ],
             },
             "params": {
@@ -100,7 +107,11 @@ class BrowserBridge(BaseTool):
                     "take_screenshot: {}. "
                     "get_page_content: {}. "
                     "wait_for_selector: {selector, timeout?}. "
-                    "scroll: {direction?, amount?, selector?}."
+                    "scroll: {direction?, amount?, selector?}. "
+                    "snapshot: {} — returns numbered element list. "
+                    "click_ref: {ref: number} — click element [N] from snapshot. "
+                    "type_ref: {ref: number, text: string, clear?: bool} — type into [N]. "
+                    "select_ref: {ref: number, value: string} — select/check [N]."
                 ),
             },
             "session_id": {

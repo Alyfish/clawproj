@@ -18,6 +18,10 @@ const VALID_ACTIONS = [
   'get_page_content',
   'wait_for_selector',
   'scroll',
+  'snapshot',
+  'click_ref',
+  'type_ref',
+  'select_ref',
 ] as const;
 
 const PORT = parseInt(process.env.CLAWBOT_BROWSER_PORT || '8090', 10);
