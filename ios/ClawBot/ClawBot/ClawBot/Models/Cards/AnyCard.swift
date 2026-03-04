@@ -33,15 +33,33 @@ extension AnyCard: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let type = try container.decode(String.self, forKey: .type)
 
+        // try? + fallback: if typed decoder fails (missing fields from browser-scraped data),
+        // degrade gracefully to GenericCardView via BaseCard instead of dropping the card.
         switch type {
         case "flight":
-            self = .flight(try FlightCard(from: decoder))
+            if let card = try? FlightCard(from: decoder) {
+                self = .flight(card)
+            } else {
+                self = .base(try BaseCard(from: decoder))
+            }
         case "house":
-            self = .house(try HouseCard(from: decoder))
+            if let card = try? HouseCard(from: decoder) {
+                self = .house(card)
+            } else {
+                self = .base(try BaseCard(from: decoder))
+            }
         case "pick":
-            self = .pick(try PickCard(from: decoder))
+            if let card = try? PickCard(from: decoder) {
+                self = .pick(card)
+            } else {
+                self = .base(try BaseCard(from: decoder))
+            }
         case "doc":
-            self = .doc(try DocCard(from: decoder))
+            if let card = try? DocCard(from: decoder) {
+                self = .doc(card)
+            } else {
+                self = .base(try BaseCard(from: decoder))
+            }
         default:
             self = .base(try BaseCard(from: decoder))
         }

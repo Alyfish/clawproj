@@ -58,6 +58,7 @@ class GatewayClient:
         self._session_id: str | None = None
         self._device_token: str | None = None
         self._pending_approvals: dict[str, asyncio.Future[dict]] = {}
+        self._pending_requests: dict[str, asyncio.Future[dict]] = {}
         self._reconnect_delay: float = config.reconnect_base_delay
         self._shutdown_event: asyncio.Event = asyncio.Event()
 
@@ -92,6 +93,10 @@ class GatewayClient:
         # Include device token for session resumption if we have one
         if self._device_token:
             handshake["payload"]["deviceToken"] = self._device_token
+        # Include sessionId so gateway can rejoin us to the same session
+        # even if tryReconnect() fails (e.g. gateway restarted)
+        if self._session_id:
+            handshake["payload"]["sessionId"] = self._session_id
 
         await self._send(handshake)
         logger.info("Gateway handshake sent")
@@ -131,6 +136,11 @@ class GatewayClient:
             if not future.done():
                 future.set_result({"approved": False, "message": "Disconnected"})
         self._pending_approvals.clear()
+        # Reject any pending requests
+        for req_id, future in list(self._pending_requests.items()):
+            if not future.done():
+                future.set_result({"error": "DISCONNECTED"})
+        self._pending_requests.clear()
         logger.info("Disconnected from gateway")
 
     async def _reconnect(self) -> None:
@@ -254,6 +264,24 @@ class GatewayClient:
                             "login_payload": payload,
                         }
 
+                    # ── Schedule task trigger ──────────────
+                    elif msg_type == "event" and event == "schedule/task:trigger":
+                        yield {
+                            "text": "__SCHEDULE_TRIGGER__",
+                            "session_id": payload.get("sessionId", "default"),
+                            "message_id": str(uuid.uuid4()),
+                            "attachments": [],
+                            "schedule_trigger": payload,
+                        }
+
+                    # ── Response to our requests ──────────
+                    elif msg_type == "res":
+                        req_id = msg.get("id")
+                        if req_id and req_id in self._pending_requests:
+                            future = self._pending_requests.pop(req_id)
+                            if not future.done():
+                                future.set_result(payload)
+
                     else:
                         logger.debug(
                             "Ignoring message: type=%s event=%s",
@@ -267,6 +295,12 @@ class GatewayClient:
             except Exception as e:
                 logger.error("Error receiving messages: %s", e)
                 await self._reconnect()
+            else:
+                # websockets v15+ can exit iteration without raising
+                # ConnectionClosed on clean server close
+                logger.warning("WebSocket iteration ended (connection lost silently)")
+                self._connected = False
+                self._ws = None
 
     # ── Event Emission ──────────────────────────────────────────
 
@@ -419,6 +453,31 @@ class GatewayClient:
             self._pending_approvals.pop(approval_id, None)
             return {"approved": False, "message": "Approval timed out"}
 
+    async def send_request(
+        self,
+        method: str,
+        payload: dict,
+        timeout: float = 30.0,
+    ) -> dict:
+        """Send a request to gateway and wait for response."""
+        req_id = str(uuid.uuid4())
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict] = loop.create_future()
+        self._pending_requests[req_id] = future
+
+        await self._send({
+            "type": "req",
+            "id": req_id,
+            "method": method,
+            "payload": payload,
+        })
+
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending_requests.pop(req_id, None)
+            return {"error": "TIMEOUT", "message": f"Request {method} timed out"}
+
 
 # ============================================================
 # MOCK GATEWAY CLIENT (for test_mode)
@@ -542,3 +601,7 @@ class MockGatewayClient:
         response = await loop.run_in_executor(None, sys.stdin.readline)
         approved = response.strip().lower() in ("y", "yes")
         return {"approved": approved, "message": "User responded in test mode"}
+
+    async def send_request(self, method: str, payload: dict, timeout: float = 30.0) -> dict:
+        """Mock send_request - returns empty success."""
+        return {"status": "ok"}

@@ -37,8 +37,8 @@ struct WatchlistItem: Identifiable, Codable, Equatable, Hashable {
     let type: WatchlistType
     let description: String
     let filters: [String: String]
-    /// Check interval in seconds
-    let interval: Int
+    /// Schedule interval (preset name like "every_6_hours" or cron expression)
+    let interval: String
     /// ISO 8601
     let lastChecked: String?
     var active: Bool
@@ -46,13 +46,14 @@ struct WatchlistItem: Identifiable, Codable, Equatable, Hashable {
     // MARK: - Computed
 
     var intervalFormatted: String {
-        if interval < 60 {
-            return "\(interval)s"
-        } else if interval < 3600 {
-            return "\(interval / 60)m"
-        } else {
-            return "\(interval / 3600)h"
+        // Handle scheduler preset names (e.g., "every_6_hours" → "Every 6 hours")
+        let cleaned = interval.replacingOccurrences(of: "_", with: " ")
+        if cleaned.hasPrefix("every ") || cleaned.hasPrefix("daily ") {
+            return cleaned.capitalized
         }
+        if cleaned == "weekly" { return "Weekly" }
+        // Fallback: show raw value (cron expression)
+        return interval
     }
 
     var lastCheckedFormatted: String? {
@@ -89,7 +90,7 @@ extension WatchlistItem {
         type: .priceWatch,
         description: "SFO → JFK under $400 round-trip",
         filters: ["origin": "SFO", "destination": "JFK", "maxPrice": "400"],
-        interval: 3600,
+        interval: "every_hour",
         lastChecked: "2026-02-28T09:00:00Z",
         active: true
     )
@@ -100,7 +101,7 @@ extension WatchlistItem {
         type: .newListing,
         description: "2BR in Williamsburg under $3,500",
         filters: ["area": "Williamsburg", "bedrooms": "2", "maxRent": "3500"],
-        interval: 1800,
+        interval: "every_hour",
         lastChecked: "2026-02-28T10:30:00Z",
         active: true
     )
@@ -111,7 +112,7 @@ extension WatchlistItem {
         type: .lineMovement,
         description: "Lakers -3.5 spread movement",
         filters: ["team": "Lakers", "spread": "-3.5"],
-        interval: 300,
+        interval: "every_5_minutes",
         lastChecked: nil,
         active: false
     )

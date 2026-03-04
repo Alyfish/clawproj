@@ -14,6 +14,7 @@ final class NotificationManager: NSObject, ObservableObject {
     static let approvalCategory = "APPROVAL_NEEDED"
     static let monitoringAlertCategory = "MONITORING_ALERT"
     static let taskCompletedCategory = "TASK_COMPLETED"
+    static let priceAlertCategory = "PRICE_ALERT"
 
     static let approveAction = "APPROVE_ACTION"
     static let denyAction = "DENY_ACTION"
@@ -97,10 +98,24 @@ final class NotificationManager: NSObject, ObservableObject {
             options: []
         )
 
+        let viewPriceAction = UNNotificationAction(
+            identifier: "VIEW_PRICE_ACTION",
+            title: "View Details",
+            options: [.foreground]
+        )
+
+        let priceAlertCategory = UNNotificationCategory(
+            identifier: Self.priceAlertCategory,
+            actions: [viewPriceAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
         UNUserNotificationCenter.current().setNotificationCategories([
             approvalCategory,
             monitoringCategory,
             taskCategory,
+            priceAlertCategory,
         ])
     }
 
@@ -229,6 +244,8 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
             handleMonitoringAction(userInfo: userInfo)
         case Self.taskCompletedCategory:
             handleTaskAction(userInfo: userInfo)
+        case Self.priceAlertCategory:
+            handlePriceAlertAction(userInfo: userInfo)
         default:
             break
         }
@@ -285,6 +302,15 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
     }
 
     private func handleTaskAction(userInfo: [AnyHashable: Any]) {
+        guard let taskId = userInfo["taskId"] as? String else { return }
+        NotificationCenter.default.post(
+            name: .deepLinkToTask,
+            object: nil,
+            userInfo: ["taskId": taskId]
+        )
+    }
+
+    private func handlePriceAlertAction(userInfo: [AnyHashable: Any]) {
         guard let taskId = userInfo["taskId"] as? String else { return }
         NotificationCenter.default.post(
             name: .deepLinkToTask,

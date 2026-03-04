@@ -63,7 +63,7 @@ Tool: save_memory
     "baseline": "489",
     "threshold": "439"
   },
-  "interval": 86400,
+  "interval": "daily_morning",
   "lastChecked": "2026-03-01T15:30:00Z",
   "active": true
 }
@@ -101,7 +101,7 @@ Tool: save_memory
     "petPolicy": "cats",
     "knownListings": "3"
   },
-  "interval": 86400,
+  "interval": "daily_morning",
   "lastChecked": "2026-03-01T10:00:00Z",
   "active": true
 }
@@ -139,7 +139,7 @@ Tool: save_memory
     "spread": "Celtics -5.5",
     "total": "O/U 224.5"
   },
-  "interval": 3600,
+  "interval": "every_hour",
   "lastChecked": "2026-03-01T12:00:00Z",
   "active": true
 }
@@ -447,11 +447,42 @@ This cross-referencing happens naturally when the agent checks memory during oth
 
 ## Important Notes
 
-1. **No scheduling or cron jobs.** This skill does NOT autonomously run on a timer. The platform or user triggers watch checks. When the user says "check my watches" → run the check flow.
+1. **Scheduling integration.** When the user says "watch this" or "monitor that", use the `schedule` tool to register a recurring check. This skill handles the checking logic; the scheduler handles timing. See [Scheduling Integration](#scheduling-integration) below.
 2. **Watches persist via memory** across conversations. The user can return days later and their watches will still be active.
 3. **Keep watch configs lean.** Store search params and baseline values, not full API responses. The check flow re-fetches current data each time.
 4. **Never update baseline.** The baseline is what the user originally saw. Always compare current values to the original baseline. If the user says "reset my baseline" then update it explicitly.
 5. **Log changes, not values.** The Price History / Line History sections log directional changes. Don't log identical values on consecutive checks.
+
+---
+
+## Scheduling Integration
+
+When creating a watch (Step 5), also register it with the scheduler so checks run automatically:
+
+```
+Tool: schedule
+{
+  "action": "create_watch",
+  "description": "SFO → LHR flight price monitor",
+  "interval": "daily_morning",
+  "check_instructions": "Search SFO→LHR flights for 2026-03-15, 1 adult, economy. Compare best price to $489 baseline. Alert if drop exceeds $50 or 10%.",
+  "skill_name": "price-monitor",
+  "payload": {
+    "watch_key": "watch-price-sfo-lhr-20260315",
+    "watch_type": "price_watch",
+    "source_skill": "flight-search"
+  }
+}
+```
+
+**How it works:**
+
+- **This skill** owns the checking logic: fetching current data, comparing to baselines, generating alerts, updating memory.
+- **The scheduler** owns timing: it fires at the configured `interval` and invokes the agent with the `check_instructions` and the previous result.
+- When a scheduled check fires, the agent receives `check_instructions` plus any prior result from the last run. Execute the instructions (re-search, compare, threshold check) and report findings via the normal alert flow.
+- The user can still say "check my watches" for an immediate manual check at any time.
+
+When deactivating a watch, also cancel the corresponding schedule entry.
 
 ---
 

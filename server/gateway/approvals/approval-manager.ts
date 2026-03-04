@@ -5,6 +5,7 @@ import type {
   ApprovalRequest,
   ApprovalResponse,
 } from '../../../shared/types/index.js';
+import type { GatewayDB } from '../src/persistence.js';
 
 export type GatewayEmitFn = (
   sessionId: string,
@@ -20,9 +21,7 @@ interface PendingApproval {
 }
 
 export class ApprovalManager {
-  // TODO: Replace with persistent store
   private pending: Map<string, PendingApproval> = new Map();
-  // TODO: Replace with persistent store
   private resolved: Map<
     string,
     { request: ApprovalRequest; response: ApprovalResponse }
@@ -31,7 +30,87 @@ export class ApprovalManager {
   constructor(
     private gatewayEmit: GatewayEmitFn,
     private timeoutMs: number = 600_000,
-  ) {}
+    private db?: GatewayDB,
+  ) {
+    if (this.db) {
+      this.rehydratePending();
+    }
+  }
+
+  private rehydratePending(): void {
+    if (!this.db) return;
+
+    const rows = this.db.getPendingApprovals();
+    const now = Date.now();
+    let recovered = 0;
+    let expired = 0;
+
+    for (const row of rows) {
+      const createdAtMs = new Date(row.created_at).getTime();
+      const elapsed = now - createdAtMs;
+      const remaining = this.timeoutMs - elapsed;
+
+      // Already past timeout — mark as denied
+      if (remaining <= 0) {
+        this.db.resolveApproval(row.id, 'denied');
+        expired++;
+        continue;
+      }
+
+      const request: ApprovalRequest = {
+        id: row.id,
+        taskId: row.task_id,
+        action: row.action as ApprovalAction,
+        description: row.description,
+        details: JSON.parse(row.details),
+        createdAt: row.created_at,
+      };
+
+      // Create fresh Promise + timeout with remaining time
+      let resolveCallback!: (decision: ApprovalDecision) => void;
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _promise = new Promise<ApprovalDecision>((res) => {
+        resolveCallback = res;
+      });
+
+      const timeoutId = setTimeout(() => {
+        if (this.pending.has(row.id)) {
+          this.pending.delete(row.id);
+          this.resolved.set(row.id, {
+            request,
+            response: {
+              id: row.id,
+              decision: 'denied',
+              decidedAt: new Date().toISOString(),
+            },
+          });
+          this.db?.resolveApproval(row.id, 'denied');
+          this.gatewayEmit(row.session_id, 'approval/timeout', {
+            approvalId: row.id,
+            taskId: row.task_id,
+          });
+          resolveCallback('denied');
+        }
+      }, remaining);
+
+      this.pending.set(row.id, {
+        request,
+        sessionId: row.session_id,
+        resolve: resolveCallback,
+        timeoutId,
+      });
+      recovered++;
+    }
+
+    console.log(
+      JSON.stringify({
+        level: 'info',
+        event: 'approvals:rehydrated',
+        data: { recovered, expired },
+        timestamp: new Date().toISOString(),
+      }),
+    );
+  }
 
   createApproval(
     taskId: string,
@@ -51,6 +130,17 @@ export class ApprovalManager {
       createdAt,
     };
 
+    // Write-through to SQLite
+    this.db?.insertApproval(
+      id,
+      sessionId,
+      taskId,
+      action,
+      description,
+      JSON.stringify(details),
+      createdAt,
+    );
+
     return new Promise<ApprovalDecision>((resolve) => {
       const timeoutId = setTimeout(() => {
         if (this.pending.has(id)) {
@@ -63,6 +153,7 @@ export class ApprovalManager {
               decidedAt: new Date().toISOString(),
             },
           });
+          this.db?.resolveApproval(id, 'denied');
           this.gatewayEmit(sessionId, 'approval/timeout', {
             approvalId: id,
             taskId,
@@ -107,6 +198,9 @@ export class ApprovalManager {
       decidedAt: new Date().toISOString(),
     };
     this.resolved.set(approvalId, { request: entry.request, response });
+
+    // Write-through to SQLite
+    this.db?.resolveApproval(approvalId, decision);
 
     entry.resolve(decision);
 
@@ -162,6 +256,8 @@ export class ApprovalManager {
             decidedAt: new Date().toISOString(),
           },
         });
+        // Write-through to SQLite
+        this.db?.resolveApproval(id, 'cancelled');
         count++;
       }
     }

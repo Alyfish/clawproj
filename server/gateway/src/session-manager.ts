@@ -6,10 +6,13 @@ import type {
   MessageHistoryEntry,
   ClientRole,
 } from './types.js';
+import type { GatewayDB } from './persistence.js';
 
 const RECONNECT_WINDOW_MS = 30_000;
 const CLEANUP_INTERVAL_MS = 10_000;
 const MAX_HISTORY_ENTRIES = 1_000;
+const ACTIVITY_DEBOUNCE_MS = 60_000;
+const SESSION_RETENTION_MS = 24 * 60 * 60 * 1000; // 24h
 
 function log(
   level: 'info' | 'warn' | 'error',
@@ -22,17 +25,57 @@ function log(
 }
 
 export default class SessionManager {
-  // TODO: Replace with Redis/DB for persistence
   private sessions: Map<string, Session> = new Map();
-  // TODO: Replace with Redis/DB for persistence
   private disconnectedClients: Map<string, DisconnectedClient> = new Map();
   private cleanupTimer: ReturnType<typeof setInterval>;
+  private activityTimers: Map<string, ReturnType<typeof setTimeout>> =
+    new Map();
+  private db: GatewayDB | null;
 
-  constructor() {
+  constructor(db?: GatewayDB) {
+    this.db = db ?? null;
+
+    // Rehydrate sessions from SQLite on startup
+    if (this.db) {
+      this.rehydrate();
+    }
+
     this.cleanupTimer = setInterval(
       () => this.cleanupExpiredDisconnects(),
       CLEANUP_INTERVAL_MS,
     );
+  }
+
+  private rehydrate(): void {
+    if (!this.db) return;
+
+    const since = new Date(Date.now() - SESSION_RETENTION_MS).toISOString();
+    const dbSessions = this.db.getActiveSessions(since);
+
+    for (const row of dbSessions) {
+      const dbMessages = this.db.getRecentMessages(row.id, MAX_HISTORY_ENTRIES);
+      const history: MessageHistoryEntry[] = dbMessages.map((m) => ({
+        id: m.id,
+        sessionId: m.session_id,
+        sender: m.sender as 'operator' | 'agent' | 'system',
+        message: JSON.parse(m.content),
+        timestamp: m.timestamp,
+      }));
+
+      const dbKeys = this.db.getProcessedKeys(row.id);
+
+      const session: Session = {
+        id: row.id,
+        clients: new Map(),
+        history,
+        processedKeys: new Set(dbKeys),
+        createdAt: row.created_at,
+        lastActivity: row.last_activity,
+      };
+      this.sessions.set(row.id, session);
+    }
+
+    log('info', 'sessions:rehydrated', { count: dbSessions.length });
   }
 
   createSession(): Session {
@@ -47,12 +90,43 @@ export default class SessionManager {
       lastActivity: now,
     };
     this.sessions.set(id, session);
+
+    // Write-through to SQLite
+    this.db?.insertSession(id, now, now);
+
     log('info', 'session:created', { sessionId: id });
     return session;
   }
 
   getSession(id: string): Session | undefined {
-    return this.sessions.get(id);
+    const cached = this.sessions.get(id);
+    if (cached) return cached;
+
+    // Cache miss — try rehydrating from SQLite
+    if (!this.db) return undefined;
+    const row = this.db.getSession(id);
+    if (!row) return undefined;
+
+    const dbMessages = this.db.getRecentMessages(id, MAX_HISTORY_ENTRIES);
+    const history: MessageHistoryEntry[] = dbMessages.map((m) => ({
+      id: m.id,
+      sessionId: m.session_id,
+      sender: m.sender as 'operator' | 'agent' | 'system',
+      message: JSON.parse(m.content),
+      timestamp: m.timestamp,
+    }));
+    const dbKeys = this.db.getProcessedKeys(id);
+
+    const session: Session = {
+      id: row.id,
+      clients: new Map(),
+      history,
+      processedKeys: new Set(dbKeys),
+      createdAt: row.created_at,
+      lastActivity: row.last_activity,
+    };
+    this.sessions.set(id, session);
+    return session;
   }
 
   findSessionForRole(role: ClientRole): Session | undefined {
@@ -85,6 +159,9 @@ export default class SessionManager {
 
     // Clear from disconnected pool if present (successful reconnect)
     this.disconnectedClients.delete(client.deviceToken);
+
+    // Debounced activity write
+    this.debouncedActivityUpdate(sessionId, session.lastActivity);
   }
 
   removeClient(deviceToken: string, sessionId: string): void {
@@ -149,10 +226,22 @@ export default class SessionManager {
     session.history.push(entry);
     session.lastActivity = new Date().toISOString();
 
-    // Cap at MAX_HISTORY_ENTRIES — remove oldest
+    // Write-through to SQLite
+    this.db?.insertMessage(
+      entry.id,
+      entry.sessionId,
+      entry.sender,
+      JSON.stringify(entry.message),
+      entry.timestamp,
+    );
+
+    // Cap at MAX_HISTORY_ENTRIES in memory (DB keeps all)
     while (session.history.length > MAX_HISTORY_ENTRIES) {
       session.history.shift();
     }
+
+    // Debounced activity write
+    this.debouncedActivityUpdate(sessionId, session.lastActivity);
   }
 
   getHistory(sessionId: string): MessageHistoryEntry[] {
@@ -169,6 +258,7 @@ export default class SessionManager {
     const session = this.sessions.get(sessionId);
     if (session) {
       session.processedKeys.add(key);
+      this.db?.insertProcessedKey(sessionId, key);
     }
   }
 
@@ -196,7 +286,7 @@ export default class SessionManager {
       }
     }
 
-    // Clean up sessions with no connected clients and no pending reconnects
+    // Evict from in-memory cache only — SQLite retains for rehydration
     for (const [id, session] of this.sessions) {
       if (session.clients.size > 0) continue;
 
@@ -206,12 +296,36 @@ export default class SessionManager {
 
       if (!hasPendingReconnect) {
         this.sessions.delete(id);
-        log('info', 'session:expired', { sessionId: id });
+        log('info', 'session:evicted_from_cache', { sessionId: id });
       }
     }
   }
 
+  private debouncedActivityUpdate(sessionId: string, timestamp: string): void {
+    if (!this.db) return;
+
+    const existing = this.activityTimers.get(sessionId);
+    if (existing) clearTimeout(existing);
+
+    const timer = setTimeout(() => {
+      this.db?.updateSessionActivity(sessionId, timestamp);
+      this.activityTimers.delete(sessionId);
+    }, ACTIVITY_DEBOUNCE_MS);
+
+    this.activityTimers.set(sessionId, timer);
+  }
+
   destroy(): void {
     clearInterval(this.cleanupTimer);
+
+    // Flush pending debounced activity updates
+    for (const [sessionId, timer] of this.activityTimers) {
+      clearTimeout(timer);
+      const session = this.sessions.get(sessionId);
+      if (session) {
+        this.db?.updateSessionActivity(sessionId, session.lastActivity);
+      }
+    }
+    this.activityTimers.clear();
   }
 }

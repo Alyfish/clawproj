@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_RESULT_CHARS = 50_000
 MAX_RETRIES = 3
 
+# SDK v0.75.0 lacks OverloadedError (added later). Build a safe tuple so
+# the except clause doesn't raise AttributeError at evaluation time.
+_RETRIABLE_SERVER_ERRORS: tuple[type[Exception], ...] = (anthropic.InternalServerError,)
+if hasattr(anthropic, "OverloadedError"):
+    _RETRIABLE_SERVER_ERRORS = (anthropic.InternalServerError, anthropic.OverloadedError)
+
 
 # ── Fallback response types (duck-type compatible with anthropic.types.Message) ──
 
@@ -214,12 +220,14 @@ class Agent:
         context_builder: ContextBuilder,
         skill_registry: SkillRegistry,
         tool_registry: ToolRegistry,
+        login_flow_manager: Any = None,
     ) -> None:
         self.config = config
         self.gateway = gateway_client
         self.context_builder = context_builder
         self.skill_registry = skill_registry
         self.tool_registry = tool_registry
+        self._login_flow = login_flow_manager
 
         self.client = anthropic.AsyncAnthropic(
             api_key=config.api_key or None  # None → reads ANTHROPIC_API_KEY env
@@ -227,6 +235,8 @@ class Agent:
 
         self._histories: dict[str, list[dict[str, Any]]] = {}
         self._active_runs: dict[str, bool] = {}
+        self._task_emitted: dict[str, bool] = {}
+        self._current_user_message: str = ""
 
     # ── Tool definitions for Claude API ───────────────────────
 
@@ -271,6 +281,18 @@ class Agent:
                     self._active_runs[run_id] = False
                 continue
 
+            # Intercept login flow events (from iOS via gateway)
+            if self._login_flow and message.get("login_event"):
+                await self._handle_login_event(message)
+                continue
+
+            # Intercept scheduled task triggers
+            if message.get("schedule_trigger"):
+                await self._handle_schedule_trigger(
+                    message["schedule_trigger"], session_id,
+                )
+                continue
+
             try:
                 await self.process_message(text, session_id)
             except Exception as e:
@@ -279,6 +301,80 @@ class Agent:
                     f"\n\nI encountered an error: {e}. Please try again.",
                     session_id,
                 )
+
+    # ── Login flow event dispatch ────────────────────────────
+
+    async def _handle_login_event(self, message: dict) -> None:
+        """Dispatch login events from iOS to LoginFlowManager."""
+        event = message["login_event"]
+        payload = message.get("login_payload", {})
+        profile = payload.get("profile", "default")
+
+        try:
+            if event == "login/input":
+                await self._login_flow.send_login_input(
+                    profile=profile,
+                    ref=payload["ref"],
+                    text=payload["text"],
+                )
+            elif event == "login/click":
+                await self._login_flow.click_login_element(
+                    profile=profile,
+                    ref=payload["ref"],
+                )
+            elif event == "login/done":
+                await self._login_flow.stop_login_flow(profile=profile)
+        except Exception as e:
+            logger.error("Login event %s failed: %s", event, e)
+
+    async def _handle_schedule_trigger(
+        self, trigger: dict, session_id: str,
+    ) -> None:
+        """Execute a scheduled watch check triggered by the gateway scheduler."""
+        job_id = trigger.get("jobId", "")
+        task_description = trigger.get("taskDescription", "")
+        check_instructions = trigger.get("checkInstructions", "")
+        skill_name = trigger.get("skillName", "")
+        previous = trigger.get("previousResult")
+
+        # Build synthetic message for the agent to process
+        parts = [
+            f"[SCHEDULED WATCH CHECK — Job {job_id}]",
+            f"Watch: {task_description}",
+            f"Instructions: {check_instructions}",
+        ]
+        if skill_name:
+            parts.append(f"Load skill '{skill_name}' if needed.")
+        if previous:
+            parts.append(
+                f"Previous result (from {previous.get('executedAt', 'unknown')}):"
+            )
+            parts.append(json.dumps(previous.get("data", {}), indent=2))
+            parts.append("Compare current data to this and note any changes.")
+        parts.append(
+            "\nExecute the check and provide a structured summary of findings."
+        )
+
+        synthetic_msg = "\n".join(parts)
+        logger.info("Executing scheduled task %s: %s", job_id, task_description)
+
+        try:
+            await self.process_message(synthetic_msg, session_id)
+            # Report success back to scheduler
+            await self.gateway.emit_event("schedule/task:result", {
+                "jobId": job_id,
+                "status": "ok",
+                "data": {},
+                "summary": f"Checked: {task_description}",
+            })
+        except Exception as e:
+            logger.error("Scheduled task %s failed: %s", job_id, e)
+            await self.gateway.emit_event("schedule/task:result", {
+                "jobId": job_id,
+                "status": "error",
+                "data": {"error": str(e)},
+                "summary": f"Error: {e}",
+            })
 
     # ── THE CORE: process_message ─────────────────────────────
 
@@ -294,18 +390,15 @@ class Agent:
         run_id = generate_run_id()
         self._active_runs[run_id] = True
 
+        self._current_user_message = user_message
+
         try:
             # 1. Signal start
             await self.gateway.stream_lifecycle("start", run_id, session_id)
 
-            # Track this run as a task for the iOS Tasks tab
+            # Task is created lazily on first tool use (see _process_tool_calls)
+            # so casual messages like "Hi" don't pollute the Tasks tab.
             task_id = run_id
-            await self.gateway.emit_task_update(task_id, "executing", step={
-                "id": uuid.uuid4().hex[:8],
-                "description": user_message[:100],
-                "status": "running",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
 
             # 2. Build context
             system_prompt = self.context_builder.build_system_prompt(
@@ -382,12 +475,15 @@ class Agent:
 
         finally:
             self._active_runs.pop(run_id, None)
-            await self.gateway.emit_task_update(task_id, "completed", step={
-                "id": uuid.uuid4().hex[:8],
-                "description": "Task completed",
-                "status": "done",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            # Only emit task completion if a task was actually created
+            # (i.e., the agent used at least one tool during this run)
+            if self._task_emitted.pop(task_id, False):
+                await self.gateway.emit_task_update(task_id, "completed", step={
+                    "id": uuid.uuid4().hex[:8],
+                    "description": "Task completed",
+                    "status": "done",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
             await self.gateway.stream_lifecycle("end", run_id, session_id)
 
     # ── Claude API calls ──────────────────────────────────────
@@ -442,7 +538,7 @@ class Agent:
                 else:
                     logger.error("Rate limited after %d retries", MAX_RETRIES)
 
-            except (anthropic.InternalServerError, anthropic.OverloadedError) as e:
+            except _RETRIABLE_SERVER_ERRORS as e:
                 last_error = e
                 if attempt < 1:
                     logger.warning("Server/overloaded error, retrying in 2s: %s", type(e).__name__)
@@ -460,23 +556,35 @@ class Agent:
 
             except anthropic.APIStatusError as e:
                 last_error = e
-                logger.error("Claude API error: %d %s", e.status_code, e.message)
-                break  # Non-retryable, fall through to OpenRouter
+                if e.status_code == 529:
+                    # Overloaded — retry once (belt-and-suspenders for SDK without OverloadedError)
+                    if attempt < 1:
+                        logger.warning("Overloaded (529), retrying in 2s")
+                        await asyncio.sleep(2)
+                    else:
+                        logger.error("Overloaded (529) after retry")
+                else:
+                    logger.error("Claude API error: %d %s", e.status_code, e.message)
+                    break  # Non-retryable, fall through to OpenRouter
 
-        # All Anthropic retries failed — try OpenRouter fallback
-        if self.config.openrouter_api_key:
-            logger.info("Falling back to OpenRouter (model: %s)", self.config.openrouter_model)
-            try:
-                return await self._call_openrouter_streaming(
-                    system, messages, tools, session_id, run_id,
-                )
-            except Exception as e:
-                logger.error("OpenRouter fallback also failed: %s", e)
-                await self.gateway.stream_text(
-                    "\n\nBoth Claude and OpenRouter are unavailable. Please try again later.",
-                    session_id,
-                )
-                return None
+        # All Anthropic retries failed — try OpenRouter fallback (cascade through models)
+        if self.config.openrouter_api_key and self.config.openrouter_models:
+            for model_id in self.config.openrouter_models:
+                logger.info("Falling back to OpenRouter (model: %s)", model_id)
+                try:
+                    return await self._call_openrouter_streaming(
+                        system, messages, tools, session_id, run_id, model_id,
+                    )
+                except Exception as e:
+                    logger.warning("OpenRouter model %s failed: %s", model_id, e)
+                    continue
+
+            # All models exhausted
+            await self.gateway.stream_text(
+                "\n\nAll fallback models are unavailable. Please try again later.",
+                session_id,
+            )
+            return None
 
         # No fallback configured — report the original error
         error_msg = str(last_error) if last_error else "Unknown error"
@@ -495,13 +603,14 @@ class Agent:
         tools: list[dict],
         session_id: str,
         run_id: str,
+        model_id: str,
     ) -> FallbackMessage:
         """Call OpenRouter via httpx. Converts Anthropic→OpenAI format, streams SSE."""
         openai_messages = _to_openai_messages(system, messages)
         openai_tools = _to_openai_tools(tools) if tools else None
 
         body: dict[str, Any] = {
-            "model": self.config.openrouter_model,
+            "model": model_id,
             "messages": openai_messages,
             "max_tokens": self.config.max_tokens,
             "stream": True,
@@ -651,6 +760,16 @@ class Agent:
                 "done" if result.success else "error", session_id,
             )
 
+            # Lazily create task on first tool use (so "Hi" doesn't become a task)
+            if task_id and not self._task_emitted.get(task_id):
+                self._task_emitted[task_id] = True
+                await self.gateway.emit_task_update(task_id, "executing", step={
+                    "id": uuid.uuid4().hex[:8],
+                    "description": self._current_user_message[:100],
+                    "status": "running",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
             # Emit task step update for the iOS Tasks tab
             if task_id:
                 await self.gateway.emit_task_update(task_id, "executing", step={
@@ -689,3 +808,14 @@ class Agent:
     def get_history(self, session_id: str) -> list[dict[str, Any]]:
         """Get conversation history for a session."""
         return self._histories.get(session_id, [])
+
+    async def shutdown(self) -> None:
+        """Graceful shutdown — cancel active runs and clean up resources."""
+        for run_id in list(self._active_runs):
+            self._active_runs[run_id] = False
+
+        if self._login_flow is not None:
+            try:
+                await self._login_flow.shutdown()
+            except Exception as e:
+                logger.warning("Login flow shutdown error: %s", e)

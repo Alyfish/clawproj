@@ -120,6 +120,13 @@ export type ApprovalHookFn = (
   context: Record<string, unknown>,
 ) => Promise<void>;
 
+/** Hook called when a pushable event occurs (task complete, price alert, etc.) */
+export type PushHookFn = (
+  sessionId: string,
+  event: string,
+  payload: Record<string, unknown>,
+) => void;
+
 export interface LogEntry {
   level: 'info' | 'warn' | 'error';
   event: string;

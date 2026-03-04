@@ -3,6 +3,7 @@ import { AuditLog } from './audit-log.js';
 import { ApprovalManager } from './approval-manager.js';
 import { TaskControl } from './task-control.js';
 import type { ApprovalAction } from '../../../shared/types/index.js';
+import type { GatewayDB } from '../src/persistence.js';
 
 export type { GatewayEmitFn } from './approval-manager.js';
 export { PolicyEngine, AuditLog, ApprovalManager, TaskControl };
@@ -30,10 +31,11 @@ export function createApprovalSystem(
     payload: Record<string, unknown>,
   ) => void,
   timeoutMs?: number,
+  db?: GatewayDB,
 ): ApprovalSystem {
   const policyEngine = new PolicyEngine();
-  const auditLog = new AuditLog();
-  const approvalManager = new ApprovalManager(gatewayEmit, timeoutMs);
+  const auditLog = new AuditLog(db);
+  const approvalManager = new ApprovalManager(gatewayEmit, timeoutMs, db);
   const taskControl = new TaskControl(approvalManager, gatewayEmit);
 
   async function approvalGate(params: ApprovalGateParams): Promise<boolean> {

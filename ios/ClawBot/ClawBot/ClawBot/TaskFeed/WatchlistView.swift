@@ -3,8 +3,8 @@ import SwiftUI
 struct WatchlistView: View {
     let items: [WatchlistItem]
     let alerts: [MonitoringAlert]
-    var onToggleActive: ((WatchlistItem, Bool) -> Void)?
-    var onSelectItem: ((WatchlistItem) -> Void)?
+    var onToggleActive: (WatchlistItem, Bool) -> Void = { _, _ in }
+    var onSelectItem: (WatchlistItem) -> Void = { _ in }
 
     var body: some View {
         Group {
@@ -37,8 +37,8 @@ struct WatchlistView: View {
                     WatchlistRowView(
                         item: item,
                         alertCount: alerts.filter { $0.watchlistItemId == item.id }.count,
-                        onToggle: { active in onToggleActive?(item, active) },
-                        onTap: { onSelectItem?(item) }
+                        onToggle: { active in onToggleActive(item, active) },
+                        onTap: { onSelectItem(item) }
                     )
                 }
             }
@@ -72,12 +72,14 @@ struct WatchlistView: View {
 struct WatchlistRowView: View {
     let item: WatchlistItem
     let alertCount: Int
-    var onToggle: ((Bool) -> Void)?
-    var onTap: (() -> Void)?
+    var onToggle: (Bool) -> Void = { _ in }
+    var onTap: () -> Void = {}
 
     @State private var isActive: Bool
 
-    init(item: WatchlistItem, alertCount: Int, onToggle: ((Bool) -> Void)? = nil, onTap: (() -> Void)? = nil) {
+    init(item: WatchlistItem, alertCount: Int,
+         onToggle: @escaping (Bool) -> Void = { _ in },
+         onTap: @escaping () -> Void = {}) {
         self.item = item
         self.alertCount = alertCount
         self.onToggle = onToggle
@@ -86,7 +88,7 @@ struct WatchlistRowView: View {
     }
 
     var body: some View {
-        Button(action: { onTap?() }) {
+        Button(action: { onTap() }) {
             HStack(spacing: 10) {
                 // Type icon
                 Image(systemName: item.type.iconName)
@@ -136,7 +138,7 @@ struct WatchlistRowView: View {
                 Toggle("", isOn: $isActive)
                     .labelsHidden()
                     .onChange(of: isActive) { _, newVal in
-                        onToggle?(newVal)
+                        onToggle(newVal)
                     }
             }
         }

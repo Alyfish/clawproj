@@ -8,10 +8,12 @@ import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
 import SessionManager from './session-manager.js';
 import MessageRouter from './message-router.js';
+import { GatewayDB } from './persistence.js';
 import type {
   ClientRole,
   ConnectedClient,
   ConnectPayload,
+  PushHookFn,
   WSMessage,
 } from './types.js';
 
@@ -37,12 +39,15 @@ function log(
 
 export interface GatewayServerOptions {
   port: number;
+  dbPath?: string;
 }
 
 export default class GatewayServer {
   private httpServer: ReturnType<typeof createServer>;
   private wss: WebSocketServer;
   private sessionManager: SessionManager;
+  private gatewayDb: GatewayDB;
+  private router: MessageRouter;
   private connections: Map<string, ConnectedClient> = new Map();
   private startTime: number = Date.now();
 
@@ -51,15 +56,27 @@ export default class GatewayServer {
     | ((client: ConnectedClient, raw: string) => void)
     | null = null;
 
+  /** Pluggable test-push endpoint handler */
+  private testPushHandler:
+    | ((body: string, res: ServerResponse) => void)
+    | null = null;
+
   private readonly port: number;
 
   constructor(options: GatewayServerOptions) {
     this.port = options.port;
-    this.sessionManager = new SessionManager();
+
+    // Initialize persistence
+    this.gatewayDb = new GatewayDB(options.dbPath);
+
+    // Pass DB to session manager for write-through persistence
+    this.sessionManager = new SessionManager(this.gatewayDb);
 
     // Wire up the message router
-    const router = new MessageRouter(this.sessionManager);
-    this.setMessageHandler((client, raw) => router.handleMessage(client, raw));
+    this.router = new MessageRouter(this.sessionManager);
+    this.setMessageHandler((client, raw) =>
+      this.router.handleMessage(client, raw),
+    );
 
     // HTTP server with /health endpoint
     this.httpServer = createServer(
@@ -74,6 +91,19 @@ export default class GatewayServer {
               uptime: Math.floor((Date.now() - this.startTime) / 1000),
             }),
           );
+        } else if (req.method === 'POST' && req.url === '/api/test-push') {
+          let body = '';
+          req.on('data', (chunk: Buffer) => {
+            body += chunk.toString();
+          });
+          req.on('end', () => {
+            if (this.testPushHandler) {
+              this.testPushHandler(body, res);
+            } else {
+              res.writeHead(501, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Push not configured' }));
+            }
+          });
         } else {
           res.writeHead(404);
           res.end();
@@ -100,8 +130,35 @@ export default class GatewayServer {
     return this.sessionManager;
   }
 
+  getDB(): GatewayDB {
+    return this.gatewayDb;
+  }
+
+  getRouter(): MessageRouter {
+    return this.router;
+  }
+
   getConnections(): Map<string, ConnectedClient> {
     return this.connections;
+  }
+
+  /** Reconfigure the message router with DB and push hook. */
+  configureRouter(db: GatewayDB, pushHook?: PushHookFn): void {
+    this.router = new MessageRouter(
+      this.sessionManager,
+      undefined,
+      pushHook,
+      db,
+    );
+    this.setMessageHandler((client, raw) =>
+      this.router.handleMessage(client, raw),
+    );
+  }
+
+  setTestPushHandler(
+    handler: (body: string, res: ServerResponse) => void,
+  ): void {
+    this.testPushHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -131,6 +188,7 @@ export default class GatewayServer {
     });
 
     this.sessionManager.destroy();
+    this.gatewayDb.close();
     log('info', 'gateway:stopped');
   }
 

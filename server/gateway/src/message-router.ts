@@ -6,8 +6,11 @@ import type {
   WSMessage,
   MessageHistoryEntry,
   ApprovalHookFn,
+  PushHookFn,
 } from './types.js';
 import SessionManager from './session-manager.js';
+import type { GatewayDB } from './persistence.js';
+import type { Scheduler } from './scheduler.js';
 
 // ── Zod schemas ──────────────────────────────────────────────
 
@@ -38,6 +41,24 @@ const LoginClickSchema = z.object({
 
 const LoginDoneSchema = z.object({
   profile: z.string().min(1),
+});
+
+const DeviceRegisterPushSchema = z.object({
+  platform: z.enum(['ios']),
+  deviceToken: z.string().min(10).max(200),
+});
+
+const ScheduleCreateSchema = z.object({
+  cronExpression: z.string().optional(),
+  interval: z.string().optional(),
+  skillName: z.string().default('price-monitor'),
+  taskDescription: z.string().min(1),
+  checkInstructions: z.string().min(1),
+  payload: z.record(z.unknown()).optional(),
+});
+
+const ScheduleIdSchema = z.object({
+  watchId: z.string().min(1),
 });
 
 const WSMessageSchema = z.object({
@@ -76,10 +97,24 @@ function log(
 export default class MessageRouter {
   private sessions: SessionManager;
   private approvalHook: ApprovalHookFn;
+  private pushHook: PushHookFn;
+  private db: GatewayDB | null;
+  private scheduler: Scheduler | null = null;
 
-  constructor(sessions: SessionManager, approvalHook?: ApprovalHookFn) {
+  constructor(
+    sessions: SessionManager,
+    approvalHook?: ApprovalHookFn,
+    pushHook?: PushHookFn,
+    db?: GatewayDB,
+  ) {
     this.sessions = sessions;
     this.approvalHook = approvalHook ?? (async () => {});
+    this.pushHook = pushHook ?? (() => {});
+    this.db = db ?? null;
+  }
+
+  setScheduler(scheduler: Scheduler): void {
+    this.scheduler = scheduler;
   }
 
   handleMessage(client: ConnectedClient, raw: string): void {
@@ -147,6 +182,24 @@ export default class MessageRouter {
         break;
       case 'login.done':
         this.handleLoginDone(client, msg);
+        break;
+      case 'device.registerPush':
+        this.handleDeviceRegisterPush(client, msg);
+        break;
+      case 'schedule.create':
+        this.handleScheduleCreate(client, msg);
+        break;
+      case 'schedule.list':
+        this.handleScheduleList(client, msg);
+        break;
+      case 'schedule.remove':
+        this.handleScheduleRemove(client, msg);
+        break;
+      case 'schedule.pause':
+        this.handleSchedulePause(client, msg);
+        break;
+      case 'schedule.resume':
+        this.handleScheduleResume(client, msg);
         break;
       default:
         this.sendError(
@@ -482,8 +535,42 @@ export default class MessageRouter {
       });
     }
 
+    // Handle schedule task results from agent
+    if (msg.event === 'schedule/task:result' && this.scheduler) {
+      const payload = msg.payload as Record<string, unknown> | undefined;
+      if (payload?.jobId) {
+        this.scheduler.handleTaskResult(payload.jobId as string, {
+          status: (payload.status as 'ok' | 'error') ?? 'ok',
+          data: (payload.data as Record<string, unknown>) ?? {},
+          summary: (payload.summary as string) ?? '',
+        });
+      }
+    }
+
     // Broadcast to all operators in the session
     this.broadcastToOperators(client.sessionId, msg);
+
+    // Trigger push notifications for pushable events
+    if (msg.event) {
+      const pushableEvents = new Set([
+        'approval/requested',
+        'task/update',
+        'monitoring/alert',
+      ]);
+      if (pushableEvents.has(msg.event)) {
+        try {
+          this.pushHook(
+            client.sessionId,
+            msg.event,
+            (msg.payload ?? {}) as Record<string, unknown>,
+          );
+        } catch (err: unknown) {
+          const message =
+            err instanceof Error ? err.message : 'Push hook error';
+          log('error', 'push_hook:error', { error: message });
+        }
+      }
+    }
 
     // Skip history for ephemeral browser login frames (~80KB each)
     if ((msg.event ?? '').startsWith('browser/login:')) {
@@ -499,6 +586,204 @@ export default class MessageRouter {
       timestamp: new Date().toISOString(),
     };
     this.sessions.addHistory(client.sessionId, historyEntry);
+  }
+
+  // ── device.registerPush ─────────────────────────────────
+
+  private handleDeviceRegisterPush(
+    client: ConnectedClient,
+    msg: WSMessage,
+  ): void {
+    const result = DeviceRegisterPushSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid device.registerPush payload: ${result.error.message}`,
+      );
+      return;
+    }
+
+    const { platform, deviceToken } = result.data;
+
+    if (this.db) {
+      this.db.registerDeviceToken(deviceToken, client.sessionId, platform);
+    }
+
+    log('info', 'device:push_registered', {
+      platform,
+      sessionId: client.sessionId,
+      tokenPrefix: deviceToken.slice(0, 8) + '...',
+    });
+
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'device.registerPush',
+      payload: { status: 'registered' },
+    });
+  }
+
+  // ── schedule.create ─────────────────────────────────────
+
+  private handleScheduleCreate(client: ConnectedClient, msg: WSMessage): void {
+    if (!this.scheduler) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.NO_AGENT,
+        'Scheduler not available',
+      );
+      return;
+    }
+    const result = ScheduleCreateSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid schedule.create payload: ${result.error.message}`,
+      );
+      return;
+    }
+    const userId = client.sessionId;
+    try {
+      const job = this.scheduler.createJob({
+        userId,
+        cronExpression:
+          result.data.cronExpression ?? result.data.interval ?? 'every_6_hours',
+        skillName: result.data.skillName,
+        taskDescription: result.data.taskDescription,
+        checkInstructions: result.data.checkInstructions,
+        payload: result.data.payload,
+      });
+      this.sendTo(client.ws, {
+        type: 'res',
+        id: msg.id,
+        method: 'schedule.create',
+        payload: { status: 'created', jobId: job.id, nextRun: job.next_run },
+      });
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : 'Failed to create job';
+      this.sendError(client.ws, msg.id, ErrorCodes.VALIDATION_ERROR, message);
+    }
+  }
+
+  // ── schedule.list ──────────────────────────────────────
+
+  private handleScheduleList(client: ConnectedClient, msg: WSMessage): void {
+    if (!this.scheduler) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.NO_AGENT,
+        'Scheduler not available',
+      );
+      return;
+    }
+    const userId = client.sessionId;
+    const jobs = this.scheduler.listJobs(userId);
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'schedule.list',
+      payload: { jobs },
+    });
+  }
+
+  // ── schedule.remove ────────────────────────────────────
+
+  private handleScheduleRemove(client: ConnectedClient, msg: WSMessage): void {
+    if (!this.scheduler) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.NO_AGENT,
+        'Scheduler not available',
+      );
+      return;
+    }
+    const result = ScheduleIdSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid schedule.remove payload: ${result.error.message}`,
+      );
+      return;
+    }
+    const removed = this.scheduler.removeJob(result.data.watchId);
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'schedule.remove',
+      payload: { status: removed ? 'removed' : 'not_found' },
+    });
+  }
+
+  // ── schedule.pause ─────────────────────────────────────
+
+  private handleSchedulePause(client: ConnectedClient, msg: WSMessage): void {
+    if (!this.scheduler) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.NO_AGENT,
+        'Scheduler not available',
+      );
+      return;
+    }
+    const result = ScheduleIdSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid schedule.pause payload: ${result.error.message}`,
+      );
+      return;
+    }
+    const paused = this.scheduler.pauseJob(result.data.watchId);
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'schedule.pause',
+      payload: { status: paused ? 'paused' : 'not_found' },
+    });
+  }
+
+  // ── schedule.resume ────────────────────────────────────
+
+  private handleScheduleResume(client: ConnectedClient, msg: WSMessage): void {
+    if (!this.scheduler) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.NO_AGENT,
+        'Scheduler not available',
+      );
+      return;
+    }
+    const result = ScheduleIdSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid schedule.resume payload: ${result.error.message}`,
+      );
+      return;
+    }
+    const resumed = this.scheduler.resumeJob(result.data.watchId);
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'schedule.resume',
+      payload: { status: resumed ? 'resumed' : 'not_found' },
+    });
   }
 
   // ── Helpers ──────────────────────────────────────────────

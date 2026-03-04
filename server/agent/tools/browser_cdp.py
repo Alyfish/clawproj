@@ -29,6 +29,8 @@ import re
 from typing import Any, Optional
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
+from server.agent.tools.browser_js import DOM_WALKER_JS, JS_LOOKUP_REF, JS_CHECK_AUTH_INDICATORS
+
 from server.agent.tools.browser_security import BrowserSecurityPolicy
 from server.agent.tools.tool_registry import BaseTool, ToolResult, truncate
 
@@ -162,20 +164,6 @@ JS_EXTRACT_BODY_TEXT = """() => {
     return document.body?.innerText ?? '';
 }"""
 
-JS_CHECK_AUTH_INDICATORS = """() => {
-    try {
-        const indicators = [
-            'a[href*="logout"]', 'a[href*="signout"]', 'a[href*="sign-out"]',
-            'a[href*="sign_out"]', 'button[aria-label*="Account"]',
-            'button[aria-label*="account"]', '[data-testid*="avatar"]',
-            'img[alt*="profile" i]', 'img[alt*="avatar" i]',
-            '[aria-label*="Sign out"]', '[aria-label*="Log out"]',
-        ];
-        return !!document.querySelector(indicators.join(', '));
-    } catch { return false; }
-}"""
-
-
 # ── CDPBrowserTool ───────────────────────────────────────────────────
 
 
@@ -222,7 +210,12 @@ class CDPBrowserTool(BaseTool):
             "get_cookies": self._get_cookies,
             "back": self._back,
             "current_url": self._current_url,
+            "snapshot": self._snapshot,
+            "click_ref": self._click_ref,
+            "type_ref": self._type_ref,
+            "select_ref": self._select_ref,
         }
+        self._login_flow_manager: Any = None
 
     # ── BaseTool interface ────────────────────────────────────────
 
@@ -230,14 +223,22 @@ class CDPBrowserTool(BaseTool):
     def name(self) -> str:
         return "browser"
 
+    def set_login_flow_manager(self, manager: Any) -> None:
+        """Wire LoginFlowManager after construction (avoids circular init)."""
+        self._login_flow_manager = manager
+        self._action_dispatch["login"] = self._login
+
     @property
     def description(self) -> str:
         return (
             "Automate browser interactions for websites without APIs. "
-            "Use for web scraping, form filling, navigating sites, and extracting data. "
-            "Every action returns a screenshot so you can see what happened. "
-            "IMPORTANT: Payment pages, form submissions, CAPTCHAs, and 2FA pages "
-            "require approval before proceeding — you will be notified when this happens."
+            "PREFERRED WORKFLOW: navigate → snapshot → click_ref/type_ref → snapshot. "
+            "The snapshot action returns a numbered list of interactive elements. "
+            "Use click_ref(N), type_ref(N, text), select_ref(N, value) to interact by number. "
+            "This is more reliable than CSS selectors. Re-snapshot after each action. "
+            "Use login action when a site requires authentication (streams browser to user for 2FA/passwords). "
+            "Payment pages, form submissions, CAPTCHAs, and 2FA pages "
+            "require approval before proceeding."
         )
 
     @property
@@ -264,7 +265,12 @@ class CDPBrowserTool(BaseTool):
                     "evaluate_js: {expression}. "
                     "get_cookies: {}. "
                     "back: {}. "
-                    "current_url: {}."
+                    "current_url: {}. "
+                    "snapshot: {} — returns numbered interactive elements. "
+                    "click_ref: {ref} — click element by snapshot ref number. "
+                    "type_ref: {ref, text} — type into element by ref number. "
+                    "select_ref: {ref, value} — select option by ref number. "
+                    "login: {url} — start interactive login flow (streams to user's phone)."
                 ),
             },
             "session_id": {
@@ -882,3 +888,112 @@ class CDPBrowserTool(BaseTool):
             "url": page.url,
             "title": await page.title(),
         }
+
+    # ── Snapshot / ref-based interaction ──────────────────────
+
+    async def _snapshot(self, page: Any, params: dict[str, Any]) -> dict[str, Any]:
+        """Walk the DOM and return numbered interactive elements."""
+        try:
+            result = await page.evaluate(DOM_WALKER_JS)
+        except Exception as e:
+            return {"success": False, "error": f"Snapshot failed: {e}"}
+        return {
+            "success": True,
+            "snapshot": result.get("snapshot", ""),
+            "elementCount": result.get("elementCount", 0),
+        }
+
+    async def _resolve_ref(self, page: Any, ref: int) -> dict | None:
+        """Look up a snapshot ref from window.__clawbot_refs. Returns entry or None."""
+        try:
+            return await page.evaluate(JS_LOOKUP_REF, ref)
+        except Exception:
+            return None
+
+    async def _click_ref(self, page: Any, params: dict[str, Any]) -> dict[str, Any]:
+        """Click an element by its snapshot ref number."""
+        ref = params.get("ref")
+        if ref is None:
+            return {"success": False, "error": "Missing required parameter: ref"}
+        entry = await self._resolve_ref(page, ref)
+        if entry is None:
+            return {
+                "success": False,
+                "error": f"Ref [{ref}] not found. Re-run snapshot to get current refs.",
+            }
+        try:
+            locator = page.locator(entry["selector"]).first
+            try:
+                await locator.scroll_into_view_if_needed(timeout=5000)
+            except Exception:
+                pass
+            await locator.click(timeout=10_000)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+        except Exception as e:
+            return {"success": False, "error": f"Click ref [{ref}] failed: {e}"}
+        return {"success": True, "ref": ref, "clicked": entry.get("description", "")}
+
+    async def _type_ref(self, page: Any, params: dict[str, Any]) -> dict[str, Any]:
+        """Type text into an element by its snapshot ref number."""
+        ref = params.get("ref")
+        text = params.get("text", "")
+        if ref is None:
+            return {"success": False, "error": "Missing required parameter: ref"}
+        if not text:
+            return {"success": False, "error": "Missing required parameter: text"}
+        entry = await self._resolve_ref(page, ref)
+        if entry is None:
+            return {
+                "success": False,
+                "error": f"Ref [{ref}] not found. Re-run snapshot to get current refs.",
+            }
+        try:
+            locator = page.locator(entry["selector"]).first
+            try:
+                await locator.scroll_into_view_if_needed(timeout=5000)
+            except Exception:
+                pass
+            await locator.fill("")
+            await locator.type(text, delay=50)
+        except Exception as e:
+            return {"success": False, "error": f"Type into ref [{ref}] failed: {e}"}
+        return {"success": True, "ref": ref, "typed": entry.get("description", "")}
+
+    async def _select_ref(self, page: Any, params: dict[str, Any]) -> dict[str, Any]:
+        """Select an option in a dropdown by its snapshot ref number."""
+        ref = params.get("ref")
+        value = params.get("value", "")
+        if ref is None:
+            return {"success": False, "error": "Missing required parameter: ref"}
+        if not value:
+            return {"success": False, "error": "Missing required parameter: value"}
+        entry = await self._resolve_ref(page, ref)
+        if entry is None:
+            return {
+                "success": False,
+                "error": f"Ref [{ref}] not found. Re-run snapshot to get current refs.",
+            }
+        try:
+            locator = page.locator(entry["selector"]).first
+            await locator.select_option(value=value, timeout=10_000)
+        except Exception as e:
+            return {"success": False, "error": f"Select ref [{ref}] failed: {e}"}
+        return {"success": True, "ref": ref, "selected": value}
+
+    # ── Login flow action ─────────────────────────────────────
+
+    async def _login(self, page: Any, params: dict[str, Any]) -> dict[str, Any]:
+        """Start interactive login flow (streams browser to user's phone)."""
+        if self._login_flow_manager is None:
+            return {"success": False, "error": "Login flow manager not configured."}
+        url = params.get("url", "")
+        if not url:
+            return {"success": False, "error": "Missing required parameter: url"}
+        profile = self._active_profile or "default"
+        interval_ms = params.get("interval_ms", 1500)
+        return await self._login_flow_manager.start_login_flow(
+            profile=profile, url=url, interval_ms=interval_ms,
+        )

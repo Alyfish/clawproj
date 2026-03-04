@@ -8,13 +8,14 @@
     "declaration": true,
     "composite": true,
     "outDir": "./dist",
-    "rootDir": "./src",
+    "rootDir": ".",
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "approvals/**/*.ts"],
+  "exclude": ["src/__tests__/**/*.ts", "approvals/__tests__/**/*.ts"],
   "references": [
     { "path": "../../shared/types" }
   ]

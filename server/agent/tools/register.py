@@ -27,13 +27,15 @@ from server.agent.tools.browser_cdp import CDPBrowserTool
 from server.agent.tools.profile_manager import ProfileManagerTool
 from server.agent.tools.vision import VisionTool
 from server.agent.browser_profiles import BrowserProfileManager
+from server.agent.tools.login_flow import LoginFlowManager
+from server.agent.tools.schedule import ScheduleTool
 
 
 def create_registry(
     gateway_client: Optional[Any] = None,
     memory_system: Optional[Any] = None,
     credential_store: Optional[Callable[[str], dict | None]] = None,
-) -> ToolRegistry:
+) -> tuple[ToolRegistry, LoginFlowManager | None]:
     """Create a ToolRegistry with all base tools registered.
 
     Args:
@@ -67,11 +69,34 @@ def create_registry(
     registry.register(SearchMemoryTool(memory_system=memory_system))
 
     # Browser automation with profile support
-    profile_manager = BrowserProfileManager()
-    registry.register(CDPBrowserTool(profile_manager=profile_manager))
-    registry.register(ProfileManagerTool(profile_manager=profile_manager))
+    try:
+        profile_manager = BrowserProfileManager()
+    except OSError:
+        profile_manager = None
+        import logging
+        logging.getLogger(__name__).warning(
+            "Browser profiles unavailable (could not create profile dir). "
+            "Set BROWSER_PROFILES_DIR to a writable path."
+        )
+
+    browser_tool = CDPBrowserTool(profile_manager=profile_manager)
+    registry.register(browser_tool)
+    if profile_manager is not None:
+        registry.register(ProfileManagerTool(profile_manager=profile_manager))
+
+    # Login flow manager (delegates to browser + profiles + gateway)
+    login_flow_manager = LoginFlowManager(
+        browser_tool=browser_tool,
+        gateway_client=gateway_client,
+        profile_manager=profile_manager,
+    )
+    browser_tool.set_login_flow_manager(login_flow_manager)
 
     # Vision extraction (agentic multi-pass pipeline)
     registry.register(VisionTool())
 
-    return registry
+    # Schedule tool (manages watches via gateway scheduler)
+    schedule_tool = ScheduleTool(gateway_client=gateway_client)
+    registry.register(schedule_tool)
+
+    return registry, login_flow_manager

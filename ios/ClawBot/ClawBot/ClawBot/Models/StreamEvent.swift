@@ -34,6 +34,8 @@ enum StreamEvent {
     )
     /// Login flow completed.
     case loginFlowEnd(profile: String, authenticated: Bool, domain: String)
+    /// Scheduled watch updated (created, removed, alert triggered).
+    case watchUpdate(action: String, watch: [String: AnyCodable]?, alert: [String: AnyCodable]?)
     /// Unrecognised event name — forward-compatible.
     case unknown(event: String, payload: [String: AnyCodable]?)
 
@@ -146,6 +148,22 @@ enum StreamEvent {
             return .loginFlowEnd(
                 profile: profile, authenticated: authenticated, domain: domain
             )
+
+        case "schedule/watch:update":
+            guard let action = p?["action"]?.stringValue else { return nil }
+            let watch: [String: AnyCodable]?
+            if let watchDict = p?["watch"]?.dictValue {
+                watch = watchDict.mapValues { AnyCodable($0) }
+            } else {
+                watch = nil
+            }
+            let alert: [String: AnyCodable]?
+            if let alertDict = p?["alert"]?.dictValue {
+                alert = alertDict.mapValues { AnyCodable($0) }
+            } else {
+                alert = nil
+            }
+            return .watchUpdate(action: action, watch: watch, alert: alert)
 
         default:
             return .unknown(event: eventName, payload: p)

@@ -78,7 +78,7 @@ async def main(args: argparse.Namespace) -> None:
     print(f"   Credentials: {config.credentials_path}")
 
     # Tools (async adapter for save/search tools)
-    tool_registry = create_registry(
+    tool_registry, login_flow_manager = create_registry(
         gateway_client=None,  # set after gateway init
         memory_system=memory_adapter,
         credential_store=credential_store.get_for_tool,
@@ -103,6 +103,10 @@ async def main(args: argparse.Namespace) -> None:
     # Wire gateway to tools that need it (create_card, request_approval)
     tool_registry.set_gateway_client(gateway)
 
+    # Wire gateway to login flow manager (created before gateway existed)
+    if login_flow_manager is not None:
+        login_flow_manager._gateway = gateway
+
     # 4. Create the agent
     agent = Agent(
         config=config,
@@ -110,6 +114,7 @@ async def main(args: argparse.Namespace) -> None:
         context_builder=context_builder,
         skill_registry=skill_registry,
         tool_registry=tool_registry,
+        login_flow_manager=login_flow_manager,
     )
 
     # 5. Connect and run
@@ -144,6 +149,7 @@ async def main(args: argparse.Namespace) -> None:
                 pass
 
     finally:
+        await agent.shutdown()
         await gateway.disconnect()
         print("ClawBot shut down cleanly")
 

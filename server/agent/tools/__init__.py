@@ -17,6 +17,7 @@ from server.agent.tools.browser_cdp import CDPBrowserTool
 from server.agent.tools.profile_manager import ProfileManagerTool
 from server.agent.tools.vision import VisionTool
 from server.agent.browser_profiles import BrowserProfileManager
+from server.agent.tools.login_flow import LoginFlowManager
 from server.agent.tools.register import create_registry
 
 
@@ -60,6 +61,7 @@ __all__ = [
     "CDPBrowserTool",
     "ProfileManagerTool",
     "BrowserProfileManager",
+    "LoginFlowManager",
     "VisionTool",
     "create_default_registry",
     "create_registry",

@@ -1,10 +1,28 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { AuditEntry } from '../../../shared/types/index.js';
-
-// TODO: Replace with persistent store (PostgreSQL, DynamoDB, etc.)
+import type { GatewayDB } from '../src/persistence.js';
 
 export class AuditLog {
   private entries: AuditEntry[] = [];
+
+  constructor(private db?: GatewayDB) {
+    if (this.db) {
+      this.rehydrate();
+    }
+  }
+
+  private rehydrate(): void {
+    if (!this.db) return;
+    const rows = this.db.getAuditLog();
+    this.entries = rows.map((r) => ({
+      id: r.id,
+      taskId: r.task_id,
+      action: r.action as AuditEntry['action'],
+      decision: r.decision as AuditEntry['decision'],
+      timestamp: r.timestamp,
+      context: JSON.parse(r.context),
+    }));
+  }
 
   log(entry: Omit<AuditEntry, 'id' | 'timestamp'>): AuditEntry {
     const id = uuidv4();
@@ -14,6 +32,17 @@ export class AuditLog {
       timestamp: new Date().toISOString(),
     };
     this.entries.push(full);
+
+    // Write-through to SQLite
+    this.db?.insertAuditEntry(
+      id,
+      entry.taskId,
+      entry.action,
+      entry.decision,
+      full.timestamp,
+      JSON.stringify(entry.context),
+    );
+
     console.log(
       JSON.stringify({
         event: 'audit:logged',
@@ -47,6 +76,7 @@ export class AuditLog {
 
   clear(): void {
     this.entries = [];
+    this.db?.clearAuditLog();
   }
 
   size(): number {

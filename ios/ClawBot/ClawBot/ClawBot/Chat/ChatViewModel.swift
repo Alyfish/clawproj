@@ -140,6 +140,8 @@ final class ChatViewModel: ObservableObject {
                 messages.append(msg)
                 persistMessages()
             }
+        case .watchUpdate:
+            break // handled by WatchlistViewModel
         case .unknown:
             break
         }
@@ -230,6 +232,11 @@ final class ChatViewModel: ObservableObject {
                let str = String(data: raw, encoding: .utf8) {
                 log("Raw card payload: \(str)")
             }
+            // Show fallback text so user knows a card was attempted
+            let title = cardDict["title"]?.value as? String ?? "Result"
+            let fallback = ChatMessage(role: .assistant, content: "\u{1F4CB} \(title) (card display failed)")
+            messages.append(fallback)
+            persistMessages()
         }
     }
 

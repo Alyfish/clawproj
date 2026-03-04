@@ -107,12 +107,16 @@ class TestInit:
         t = CDPBrowserTool()
         assert t._cdp_url == "ws://custom:9222"
 
-    def test_parameters_has_11_actions(self, tool):
+    def test_parameters_has_all_actions(self, tool):
         actions = tool.parameters["action"]["enum"]
-        assert len(actions) == 11
+        assert len(actions) == 15  # 11 original + snapshot + click_ref + type_ref + select_ref
         assert "navigate" in actions
         assert "evaluate_js" in actions
         assert "get_cookies" in actions
+        assert "snapshot" in actions
+        assert "click_ref" in actions
+        assert "type_ref" in actions
+        assert "select_ref" in actions
 
     def test_has_session_id_param(self, tool):
         assert "session_id" in tool.parameters

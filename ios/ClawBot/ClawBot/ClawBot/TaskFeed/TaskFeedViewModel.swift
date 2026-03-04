@@ -52,18 +52,21 @@ final class TaskFeedViewModel: ObservableObject {
     }
 
     func toggleWatchActive(_ item: WatchlistItem, active: Bool) {
+        let method = active ? "schedule.resume" : "schedule.pause"
+        let payload: [String: AnyCodable] = [
+            "watchId": AnyCodable(item.id),
+        ]
         let message = WSMessage.request(
-            method: "watchlist.toggle",
+            method: method,
             id: UUID().uuidString,
-            payload: [
-                "watchlistItemId": AnyCodable(item.id),
-                "active": AnyCodable(active),
-            ]
+            payload: payload
         )
         webSocket.send(message)
         // Optimistic update
         if let index = watchItems.firstIndex(where: { $0.id == item.id }) {
-            watchItems[index].active = active
+            var updated = watchItems[index]
+            updated.active = active
+            watchItems[index] = updated
         }
     }
 
@@ -121,6 +124,70 @@ final class TaskFeedViewModel: ObservableObject {
                 createdAt: ISO8601DateFormatter().string(from: Date())
             )
             pendingApprovals.append(approval)
+
+        case .watchUpdate(let action, let watchData, let alertData):
+            switch action {
+            case "created", "updated", "resumed":
+                if let watchData = watchData,
+                   let id = watchData["id"]?.value as? String,
+                   let desc = watchData["description"]?.value as? String {
+                    let typeStr = watchData["type"]?.value as? String ?? "price_watch"
+                    let taskId = watchData["taskId"]?.value as? String ?? ""
+                    let filtersAny = watchData["filters"]?.value as? [String: Any] ?? [:]
+                    let filters = filtersAny.compactMapValues { $0 as? String }
+                    let interval = watchData["interval"]?.value as? String ?? "every_6_hours"
+                    let lastChecked = watchData["lastChecked"]?.value as? String
+                    let active = watchData["active"]?.value as? Bool ?? true
+                    let item = WatchlistItem(
+                        id: id,
+                        taskId: taskId,
+                        type: WatchlistType(rawValue: typeStr) ?? .priceWatch,
+                        description: desc,
+                        filters: filters,
+                        interval: interval,
+                        lastChecked: lastChecked,
+                        active: active
+                    )
+                    if let idx = watchItems.firstIndex(where: { $0.id == id }) {
+                        watchItems[idx] = item
+                    } else {
+                        watchItems.append(item)
+                    }
+                }
+            case "removed":
+                if let watchData = watchData,
+                   let id = watchData["id"]?.value as? String {
+                    watchItems.removeAll { $0.id == id }
+                }
+            case "paused":
+                if let watchData = watchData,
+                   let id = watchData["id"]?.value as? String,
+                   let idx = watchItems.firstIndex(where: { $0.id == id }) {
+                    // Create updated item with active=false
+                    var updated = watchItems[idx]
+                    updated.active = false
+                    watchItems[idx] = updated
+                }
+            case "alert":
+                if let alertData = alertData,
+                   let id = alertData["id"]?.value as? String,
+                   let watchId = alertData["watchId"]?.value as? String,
+                   let message = alertData["message"]?.value as? String {
+                    let timestamp = alertData["timestamp"]?.value as? String ?? ""
+                    let rawData = alertData["data"]?.value as? [String: Any] ?? [:]
+                    let dataDict = rawData.compactMapValues { "\($0)" } as [String: String]
+                    let alert = MonitoringAlert(
+                        id: id,
+                        watchlistItemId: watchId,
+                        message: message,
+                        data: dataDict,
+                        timestamp: timestamp
+                    )
+                    alerts.insert(alert, at: 0)
+                }
+            default:
+                break
+            }
 
         default:
             break

@@ -65,6 +65,51 @@ struct HouseCard: Identifiable, Codable, Equatable {
     var bedroomLabel: String {
         bedrooms == 0 ? "Studio" : "\(bedrooms) BR"
     }
+
+    // MARK: - Resilient Decoding
+    // Browser-scraped data may omit fields. Use decodeIfPresent with defaults
+    // so cards render with partial data instead of silently failing.
+
+    enum CodingKeys: String, CodingKey {
+        case id, address, rent, bedrooms, area, commute, leaseTerms, moveInDate
+        case requiredDocs, redFlags, source, listingUrl
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        address = try container.decodeIfPresent(String.self, forKey: .address) ?? "Address not available"
+        rent = try container.decode(Rent.self, forKey: .rent)
+        bedrooms = try container.decodeIfPresent(Int.self, forKey: .bedrooms) ?? 0
+        area = try container.decodeIfPresent(String.self, forKey: .area) ?? ""
+        commute = try container.decodeIfPresent(Commute.self, forKey: .commute)
+                  ?? Commute(destination: "", time: "N/A", mode: "")
+        leaseTerms = try container.decodeIfPresent(String.self, forKey: .leaseTerms) ?? ""
+        moveInDate = try container.decodeIfPresent(String.self, forKey: .moveInDate) ?? ""
+        requiredDocs = try container.decodeIfPresent([String].self, forKey: .requiredDocs) ?? []
+        redFlags = try container.decodeIfPresent([String].self, forKey: .redFlags) ?? []
+        source = try container.decodeIfPresent(String.self, forKey: .source) ?? ""
+        listingUrl = try container.decodeIfPresent(String.self, forKey: .listingUrl) ?? ""
+    }
+
+    init(
+        id: String, address: String, rent: Rent, bedrooms: Int, area: String,
+        commute: Commute, leaseTerms: String, moveInDate: String,
+        requiredDocs: [String], redFlags: [String], source: String, listingUrl: String
+    ) {
+        self.id = id
+        self.address = address
+        self.rent = rent
+        self.bedrooms = bedrooms
+        self.area = area
+        self.commute = commute
+        self.leaseTerms = leaseTerms
+        self.moveInDate = moveInDate
+        self.requiredDocs = requiredDocs
+        self.redFlags = redFlags
+        self.source = source
+        self.listingUrl = listingUrl
+    }
 }
 
 // MARK: - Mock Data

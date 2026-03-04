@@ -56,9 +56,15 @@ class AgentConfig:
     soul_path: str = "SOUL.md"
     credentials_path: str = ".credentials/"
 
-    # --- OpenRouter fallback ---
+    # --- OpenRouter fallback (cascading, cheapest first) ---
     openrouter_api_key: str = ""      # loaded from OPENROUTER_API_KEY
-    openrouter_model: str = "anthropic/claude-sonnet-4-5-20250929"  # loaded from OPENROUTER_MODEL
+    openrouter_models: list[str] = field(default_factory=lambda: [
+        "google/gemini-2.5-flash-lite",           # ultra cheap, good tool calling
+        "google/gemini-2.5-flash",                 # cheap, great quality
+        "openai/gpt-4o-mini",                      # cheap, reliable tools
+        "meta-llama/llama-3.3-70b-instruct:free",  # free, decent quality
+        "anthropic/claude-haiku-4.5",               # cheap Claude
+    ])
 
     # --- Test mode ---
     test_mode: bool = False           # stdin/stdout instead of gateway
@@ -90,7 +96,9 @@ class AgentConfig:
         # Load OpenRouter config from environment (accept both var names)
         if not self.openrouter_api_key:
             self.openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "") or os.environ.get("OPEN_ROUTER_API_KEY", "")
-        self.openrouter_model = os.environ.get("OPENROUTER_MODEL", self.openrouter_model)
+        models_env = os.environ.get("OPENROUTER_MODELS") or os.environ.get("OPENROUTER_MODEL")
+        if models_env:
+            self.openrouter_models = [m.strip() for m in models_env.split(",") if m.strip()]
 
         # Override from environment
         self.model = os.environ.get("CLAWBOT_MODEL", self.model)
