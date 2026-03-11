@@ -22,6 +22,11 @@ services:
       retries: 5
       start_period: 15s
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
 
   searxng:
     image: searxng/searxng:latest
@@ -50,10 +55,23 @@ services:
       dockerfile: server/gateway/Dockerfile
     container_name: clawbot-gateway
     ports:
-      - "8080:8080"
+      - "${GATEWAY_PORT:-8080}:8080"
     environment:
       GATEWAY_PORT: "8080"
+    volumes:
+      - gateway-data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:8080/health', r => { process.exit(r.statusCode === 200 ? 0 : 1) }).on('error', () => process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
 
   agent:
     build:
@@ -64,7 +82,7 @@ services:
       browser:
         condition: service_healthy
       gateway:
-        condition: service_started
+        condition: service_healthy
       searxng:
         condition: service_healthy
     volumes:
@@ -77,10 +95,22 @@ services:
       BROWSER_PROFILES_DIR: "/data/browser-profiles"
       CLAWBOT_SEARXNG_URL: "http://searxng:8080"
       CLAWBOT_WORKSPACE: "/workspace"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import os; os.kill(1, 0)'"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
 
 volumes:
   browser-data:
   browser-profiles:
   searxng-data:
   workspace:
+  gateway-data:

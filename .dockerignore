@@ -5,3 +5,5 @@ ios/
 __pycache__
 .pytest_cache
 .env
+scripts/
+server/gateway/data/

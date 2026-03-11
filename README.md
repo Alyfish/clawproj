@@ -83,23 +83,34 @@ clawproj/
 
 ## Getting Started
 
-**Quick Start (Docker):**
+### One-Command Setup
+
 ```bash
-cp .env.example .env  # Add your ANTHROPIC_API_KEY
-docker compose -f docker-compose.browser.yml up
+git clone https://github.com/Alyfish/clawproj.git && cd clawproj
+make setup
 ```
+
+The setup wizard checks prerequisites, prompts for your Anthropic API key, builds all 4 containers, and prints the WebSocket URL for iOS.
+
+### Manual Setup
+
+```bash
+cp .env.example .env           # Add your ANTHROPIC_API_KEY
+docker compose up -d           # Start all 4 services
+make status                    # Verify everything is healthy
+```
+
+### Development (without Docker)
 
 **Gateway:**
 ```bash
-cd server/gateway
-npm install
-npm run dev                    # Starts WebSocket server on :8080
+cd server/gateway && npm install && npm run dev    # WebSocket server on :8080
 ```
 
 **Agent:**
 ```bash
 pip install -r server/agent/requirements.txt
-export ANTHROPIC_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...
 python -m server.agent.main --test     # Test mode (stdin/stdout)
 python -m server.agent.main            # Connect to gateway
 ```
@@ -107,11 +118,26 @@ python -m server.agent.main            # Connect to gateway
 **iOS:**
 Open `ios/ClawBot/ClawBot/ClawBot.xcodeproj` in Xcode and build.
 
-**Tests:**
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `make setup` | Interactive setup wizard |
+| `make up` | Start all containers |
+| `make down` | Stop all containers |
+| `make logs` | Tail all container logs |
+| `make status` | Health check + connection info |
+| `make test` | Run all tests (370+ Python, 12+ Node) |
+| `make rebuild` | Force rebuild containers |
+| `make clean` | Remove containers and volumes |
+
+### Tests
+
 ```bash
-python3 -m pytest server/agent/tests/ -v      # 370+ tests
-cd server/gateway && npx tsx approvals/__tests__/policy-engine.test.ts  # 12 tests
-./scripts/test-integration.sh                  # Integration tests (Docker required)
+make test                                                    # All tests
+python3 -m pytest server/agent/tests/ -v                     # Python only (370+)
+cd server/gateway && npx tsx --test src/__tests__/*.test.ts   # Node only (12+)
+./scripts/test-integration.sh                                # Integration (Docker)
 ```
 
 ## Safety & Approvals

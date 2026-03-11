@@ -4,7 +4,7 @@ set -e
 echo "=== ClawBot Integration Tests ==="
 
 echo "Starting SearXNG container..."
-docker compose -f docker-compose.browser.yml up -d searxng
+docker compose up -d searxng
 
 echo "Waiting for SearXNG healthcheck..."
 for i in $(seq 1 30); do
