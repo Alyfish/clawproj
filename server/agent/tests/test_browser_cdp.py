@@ -109,7 +109,7 @@ class TestInit:
 
     def test_parameters_has_all_actions(self, tool):
         actions = tool.parameters["action"]["enum"]
-        assert len(actions) == 15  # 11 original + snapshot + click_ref + type_ref + select_ref
+        assert len(actions) == 16  # 11 original + snapshot + click_ref + type_ref + select_ref + authenticate
         assert "navigate" in actions
         assert "evaluate_js" in actions
         assert "get_cookies" in actions

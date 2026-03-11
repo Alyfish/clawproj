@@ -38,6 +38,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -46,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────
 
-CRED_TYPES = ("api_key", "oauth2", "bearer", "basic", "custom")
+CRED_TYPES = ("api_key", "oauth2", "bearer", "basic", "custom", "site_login")
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 MAX_NAME_LENGTH = 64
 
@@ -60,6 +61,7 @@ REQUIRED_FIELDS: dict[str, list[str]] = {
     "bearer": ["token"],
     "basic": ["username", "password"],
     "custom": [],  # validated separately (needs headers OR query_params)
+    "site_login": ["url_pattern", "username", "password"],
 }
 
 
@@ -294,6 +296,50 @@ class CredentialStore:
         value = os.environ.get(env_key)
         if value:
             return {"type": "api_key", "value": value}
+
+        return None
+
+    # ── Site Login Lookup ───────────────────────────────────
+
+    def get_site_login(self, url: str) -> dict | None:
+        """Look up a site_login credential matching the given URL.
+
+        Matches the URL's hostname against stored url_pattern fields.
+        A url_pattern matches if the hostname ends with the pattern
+        (e.g., "google.com" matches "accounts.google.com").
+
+        Returns:
+            {"username": str, "password": str, "name": str} or None.
+            NEVER log the returned password.
+        """
+        try:
+            parsed = urlparse(url) if "://" in url else urlparse(f"https://{url}")
+            hostname = (parsed.hostname or "").lower()
+        except Exception:
+            return None
+
+        if not hostname:
+            return None
+
+        for cred_name in self.list():
+            cred = self.get(cred_name)
+            if cred is None or cred.get("type") != "site_login":
+                continue
+            data = cred.get("data", {})
+            pattern = data.get("url_pattern", "").lower().strip()
+            if not pattern:
+                continue
+            # Match: hostname ends with pattern or equals pattern
+            if hostname == pattern or hostname.endswith("." + pattern):
+                logger.info(
+                    "Site login matched: credential=%s domain=%s",
+                    cred_name, hostname,
+                )
+                return {
+                    "username": data.get("username", ""),
+                    "password": data.get("password", ""),
+                    "name": cred_name,
+                }
 
         return None
 
@@ -577,8 +623,8 @@ def _cli_add(store: CredentialStore) -> None:
         print("Error: name cannot be empty")
         return
 
-    cred_type = input("Type (api_key/oauth2/bearer/basic/custom): ").strip().lower()
-    if cred_type not in ("api_key", "oauth2", "bearer", "basic", "custom"):
+    cred_type = input("Type (api_key/oauth2/bearer/basic/custom/site_login): ").strip().lower()
+    if cred_type not in CRED_TYPES:
         print(f"Error: unknown type '{cred_type}'")
         return
 
@@ -619,6 +665,12 @@ def _cli_add(store: CredentialStore) -> None:
         except json.JSONDecodeError:
             print("Error: invalid JSON for query params")
             return
+
+    elif cred_type == "site_login":
+        data["url_pattern"] = input("URL pattern (e.g., accounts.google.com): ").strip()
+        data["username"] = input("Username/email: ").strip()
+        data["password"] = getpass.getpass("Password: ")
+        data["notes"] = input("Notes (optional): ").strip()
 
     store.set(name, cred_type, data)
     print(f"Credential '{name}' saved successfully")

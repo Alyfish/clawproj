@@ -37,6 +37,7 @@ def create_registry(
     gateway_client: Optional[Any] = None,
     memory_system: Optional[Any] = None,
     credential_store: Optional[Callable[[str], dict | None]] = None,
+    site_login_lookup: Optional[Callable[[str], dict | None]] = None,
 ) -> tuple[ToolRegistry, LoginFlowManager | None]:
     """Create a ToolRegistry with all base tools registered.
 
@@ -74,7 +75,10 @@ def create_registry(
             "Set BROWSER_PROFILES_DIR to a writable path."
         )
 
-    browser_tool = CDPBrowserTool(profile_manager=profile_manager)
+    browser_tool = CDPBrowserTool(
+        profile_manager=profile_manager,
+        credential_lookup=site_login_lookup,
+    )
     registry.register(browser_tool)
     if profile_manager is not None:
         registry.register(ProfileManagerTool(profile_manager=profile_manager))

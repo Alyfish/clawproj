@@ -164,6 +164,50 @@ JS_EXTRACT_BODY_TEXT = """() => {
     return document.body?.innerText ?? '';
 }"""
 
+JS_DETECT_LOGIN_FORM = """() => {
+    try {
+        const inputs = Array.from(document.querySelectorAll('input'));
+        const pwField = inputs.find(i =>
+            i.type === 'password' && !i.hidden &&
+            i.offsetWidth > 0 && i.offsetHeight > 0
+        );
+        const textField = inputs.find(i =>
+            (i.type === 'text' || i.type === 'email' || i.type === 'tel') &&
+            !i.hidden && i.offsetWidth > 0 && i.offsetHeight > 0
+        );
+        // Find a submit-like button
+        const buttons = Array.from(document.querySelectorAll(
+            'button[type="submit"], input[type="submit"], ' +
+            'button:not([type]), [role="button"]'
+        ));
+        const submitBtn = buttons.find(b => {
+            const txt = (b.textContent || b.value || '').toLowerCase();
+            return /sign.?in|log.?in|next|continue|submit/i.test(txt);
+        });
+        return {
+            hasPassword: !!pwField,
+            hasUsername: !!textField,
+            hasSubmit: !!submitBtn,
+            usernameSelector: textField ? (
+                textField.id ? '#' + CSS.escape(textField.id) :
+                textField.name ? 'input[name="' + textField.name + '"]' :
+                'input[type="' + textField.type + '"]'
+            ) : null,
+            passwordSelector: pwField ? (
+                pwField.id ? '#' + CSS.escape(pwField.id) :
+                pwField.name ? 'input[name="' + pwField.name + '"]' :
+                'input[type="password"]'
+            ) : null,
+            submitSelector: submitBtn ? (
+                submitBtn.id ? '#' + CSS.escape(submitBtn.id) :
+                submitBtn.name ? '[name="' + submitBtn.name + '"]' :
+                submitBtn.type === 'submit' ? '[type="submit"]' :
+                'button'
+            ) : null,
+        };
+    } catch { return { hasPassword: false, hasUsername: false, hasSubmit: false }; }
+}"""
+
 # ── CDPBrowserTool ───────────────────────────────────────────────────
 
 
@@ -182,7 +226,11 @@ class CDPBrowserTool(BaseTool):
     MAX_RETRIES = 3
     BASE_RETRY_DELAY = 1.0
 
-    def __init__(self, profile_manager: Any | None = None) -> None:
+    def __init__(
+        self,
+        profile_manager: Any | None = None,
+        credential_lookup: Any | None = None,
+    ) -> None:
         raw_url = os.environ.get(
             "BROWSER_CDP_URL", "ws://localhost:3000?token=clawbot-dev"
         )
@@ -193,6 +241,7 @@ class CDPBrowserTool(BaseTool):
         self._contexts: dict[str, Any] = {}  # session_id -> BrowserContext
         self._pages: dict[str, Any] = {}  # session_id -> Page
         self._profile_manager: Any = profile_manager
+        self._credential_lookup: Any = credential_lookup  # (url) -> {username, password, name} | None
         self._active_profile: str | None = None
         self._security = BrowserSecurityPolicy()
         self._nav_counts: dict[str, int] = {}  # session_id -> navigation count
@@ -214,6 +263,7 @@ class CDPBrowserTool(BaseTool):
             "click_ref": self._click_ref,
             "type_ref": self._type_ref,
             "select_ref": self._select_ref,
+            "authenticate": self._authenticate,
         }
         self._login_flow_manager: Any = None
 
@@ -236,7 +286,8 @@ class CDPBrowserTool(BaseTool):
             "The snapshot action returns a numbered list of interactive elements. "
             "Use click_ref(N), type_ref(N, text), select_ref(N, value) to interact by number. "
             "This is more reliable than CSS selectors. Re-snapshot after each action. "
-            "Use login action when a site requires authentication (streams browser to user for 2FA/passwords). "
+            "Use authenticate action to auto-fill stored credentials and handle 2FA. "
+            "Use login action for fully manual authentication (streams browser to user's phone). "
             "Payment pages, form submissions, CAPTCHAs, and 2FA pages "
             "require approval before proceeding."
         )
@@ -270,7 +321,9 @@ class CDPBrowserTool(BaseTool):
                     "click_ref: {ref} — click element by snapshot ref number. "
                     "type_ref: {ref, text} — type into element by ref number. "
                     "select_ref: {ref, value} — select option by ref number. "
-                    "login: {url} — start interactive login flow (streams to user's phone)."
+                    "login: {url} — start interactive login flow (streams to user's phone). "
+                    "authenticate: {url, credential_name?} — auto-fill stored credentials, detect 2FA, "
+                    "falls back to manual login if no credentials or 2FA required."
                 ),
             },
             "session_id": {
@@ -1055,3 +1108,201 @@ class CDPBrowserTool(BaseTool):
         return await self._login_flow_manager.start_login_flow(
             profile=profile, url=url, interval_ms=interval_ms,
         )
+
+    # ── Authenticate action (auto-fill + 2FA handoff) ─────────
+
+    async def _authenticate(self, page: Any, params: dict[str, Any]) -> dict[str, Any]:
+        """Auto-fill login credentials, detect 2FA, fall back to manual if needed.
+
+        Flow:
+        1. Navigate to URL
+        2. Detect login form fields (username, password, submit)
+        3. Look up stored credentials from credential_store
+        4. Auto-fill username and password
+        5. Click submit
+        6. Check for 2FA / CAPTCHA → fall back to manual login flow
+        7. Check for auth indicators → record domain in profile
+        """
+        url = params.get("url", "")
+        if not url:
+            return {"success": False, "error": "Missing required parameter: url"}
+
+        credential_name = params.get("credential_name")
+        profile = self._active_profile or "default"
+
+        # Step 1: Navigate
+        nav_result = await self._navigate(page, {"url": url})
+        if isinstance(nav_result, dict) and not nav_result.get("success", True):
+            return nav_result
+
+        # Step 2: Check if already authenticated
+        try:
+            already_auth = await page.evaluate(JS_CHECK_AUTH_INDICATORS)
+            if already_auth:
+                domain = urlparse(page.url).hostname or ""
+                if domain and self._profile_manager:
+                    self._profile_manager.add_authenticated_domain(profile, domain)
+                return {
+                    "success": True,
+                    "status": "already_authenticated",
+                    "domain": domain,
+                }
+        except Exception:
+            pass
+
+        # Step 3: Detect login form
+        try:
+            form_info = await page.evaluate(JS_DETECT_LOGIN_FORM)
+        except Exception as e:
+            return {"success": False, "error": f"Failed to detect login form: {e}"}
+
+        if not form_info.get("hasUsername") and not form_info.get("hasPassword"):
+            # No login form — fall back to manual
+            return await self._authenticate_fallback_manual(
+                url, profile, "No login form detected on page"
+            )
+
+        # Step 4: Look up credentials
+        creds = None
+        if credential_name and self._credential_lookup:
+            # Look up by name: use get() on the store, then extract site_login data
+            cred_data = self._credential_lookup(url)
+            if cred_data and cred_data.get("name") == credential_name:
+                creds = cred_data
+            elif self._credential_lookup:
+                # Try matching by URL anyway
+                creds = self._credential_lookup(url)
+        elif self._credential_lookup:
+            creds = self._credential_lookup(url)
+
+        if not creds:
+            return await self._authenticate_fallback_manual(
+                url, profile,
+                f"No stored credentials found for {urlparse(url).hostname or url}"
+            )
+
+        # Step 5: Auto-fill username (if field exists)
+        username_sel = form_info.get("usernameSelector")
+        password_sel = form_info.get("passwordSelector")
+        submit_sel = form_info.get("submitSelector")
+
+        try:
+            if username_sel and creds.get("username"):
+                locator = page.locator(username_sel).first
+                await locator.fill("", timeout=5000)
+                await locator.type(creds["username"], delay=30, timeout=10_000)
+
+            # Some login forms show password on a second page (e.g., Google)
+            # If no password field yet, click submit/next to advance
+            if not password_sel and submit_sel:
+                await page.locator(submit_sel).first.click(timeout=10_000)
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=5000)
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+                # Re-detect form for password field
+                form_info = await page.evaluate(JS_DETECT_LOGIN_FORM)
+                password_sel = form_info.get("passwordSelector")
+                submit_sel = form_info.get("submitSelector")
+
+            # Step 6: Auto-fill password
+            if password_sel and creds.get("password"):
+                locator = page.locator(password_sel).first
+                await locator.fill("", timeout=5000)
+                await locator.type(creds["password"], delay=30, timeout=10_000)
+            elif not password_sel:
+                return await self._authenticate_fallback_manual(
+                    url, profile, "Password field not found after username entry"
+                )
+
+            # Step 7: Click submit
+            if submit_sel:
+                await page.locator(submit_sel).first.click(timeout=10_000)
+            else:
+                # Try pressing Enter as fallback
+                await page.keyboard.press("Enter")
+
+            # Wait for page to load after submit
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=10_000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+        except Exception as e:
+            logger.warning("Auto-fill failed, falling back to manual: %s", e)
+            return await self._authenticate_fallback_manual(
+                url, profile, f"Auto-fill failed: {e}"
+            )
+
+        # Step 8: Check for 2FA / CAPTCHA
+        try:
+            has_2fa = await page.evaluate(JS_CHECK_2FA)
+            has_captcha = await page.evaluate(JS_CHECK_CAPTCHA)
+        except Exception:
+            has_2fa = False
+            has_captcha = False
+
+        if has_2fa or has_captcha:
+            reason = "2FA" if has_2fa else "CAPTCHA"
+            logger.info("Authenticate: %s detected, switching to manual login", reason)
+            # Start manual login flow so user can complete 2FA on their phone
+            if self._login_flow_manager:
+                await self._login_flow_manager.start_login_flow(
+                    profile=profile, url=page.url, interval_ms=1500,
+                )
+                return {
+                    "success": True,
+                    "status": "2fa_manual_handoff",
+                    "reason": f"{reason} detected — streaming browser to your phone. "
+                              f"Please complete the {reason} challenge.",
+                }
+            return {
+                "success": False,
+                "error": f"{reason} detected but login flow manager not configured.",
+            }
+
+        # Step 9: Check if we're now authenticated
+        try:
+            is_auth = await page.evaluate(JS_CHECK_AUTH_INDICATORS)
+        except Exception:
+            is_auth = False
+
+        domain = ""
+        try:
+            domain = urlparse(page.url).hostname or ""
+        except Exception:
+            pass
+
+        if is_auth and domain and self._profile_manager:
+            self._profile_manager.add_authenticated_domain(profile, domain)
+
+        return {
+            "success": True,
+            "status": "authenticated" if is_auth else "submitted",
+            "domain": domain,
+            "credential_used": creds.get("name", ""),
+            "authenticated": is_auth,
+        }
+
+    async def _authenticate_fallback_manual(
+        self, url: str, profile: str, reason: str,
+    ) -> dict[str, Any]:
+        """Fall back to manual login flow when auto-fill can't proceed."""
+        if self._login_flow_manager is None:
+            return {
+                "success": False,
+                "error": f"{reason}. Manual login flow not available.",
+            }
+        logger.info("Authenticate fallback to manual: %s", reason)
+        result = await self._login_flow_manager.start_login_flow(
+            profile=profile, url=url, interval_ms=1500,
+        )
+        if result.get("success"):
+            return {
+                "success": True,
+                "status": "manual_login_started",
+                "reason": reason,
+            }
+        return result

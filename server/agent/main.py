@@ -90,6 +90,7 @@ async def main(args: argparse.Namespace) -> None:
         gateway_client=None,  # set after gateway init
         memory_system=memory_adapter,
         credential_store=credential_store.get_for_tool,
+        site_login_lookup=credential_store.get_site_login,
     )
 
     # Context (sync MemoryStore satisfies MemorySystemProtocol)
