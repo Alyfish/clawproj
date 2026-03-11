@@ -21,12 +21,20 @@ final class TaskFeedViewModel: ObservableObject {
     // MARK: - Private
 
     private let webSocket: any WebSocketServiceProtocol
+    private let taskStore: TaskStore
+    private let watchlistStore: WatchlistStore
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Init
 
-    init(webSocket: any WebSocketServiceProtocol) {
+    init(
+        webSocket: any WebSocketServiceProtocol,
+        taskStore: TaskStore = TaskStore(),
+        watchlistStore: WatchlistStore = WatchlistStore()
+    ) {
         self.webSocket = webSocket
+        self.taskStore = taskStore
+        self.watchlistStore = watchlistStore
 
         webSocket.streamEventPublisher
             .receive(on: DispatchQueue.main)
@@ -49,6 +57,7 @@ final class TaskFeedViewModel: ObservableObject {
         if let index = tasks.firstIndex(where: { $0.id == taskId }) {
             tasks[index].status = .stopped
             tasks[index].updatedAt = ISO8601DateFormatter().string(from: Date())
+            persistTasks()
         }
     }
 
@@ -68,17 +77,20 @@ final class TaskFeedViewModel: ObservableObject {
             var updated = watchItems[index]
             updated.active = active
             watchItems[index] = updated
+            persistWatchlists()
         }
     }
 
     func approveAction(_ approvalId: String) {
         webSocket.sendApprovalResponse(approvalId: approvalId, decision: "approved")
         pendingApprovals.removeAll { $0.id == approvalId }
+        persistTasks()
     }
 
     func denyAction(_ approvalId: String) {
         webSocket.sendApprovalResponse(approvalId: approvalId, decision: "denied")
         pendingApprovals.removeAll { $0.id == approvalId }
+        persistTasks()
     }
 
     // MARK: - Event handling
@@ -114,6 +126,7 @@ final class TaskFeedViewModel: ObservableObject {
                 )
                 tasks.insert(newTask, at: 0)
             }
+            persistTasks()
 
         case .approvalRequested(let id, let taskId, let action, let description, _):
             guard !pendingApprovals.contains(where: { $0.id == id }) else { return }
@@ -125,6 +138,7 @@ final class TaskFeedViewModel: ObservableObject {
                 createdAt: ISO8601DateFormatter().string(from: Date())
             )
             pendingApprovals.append(approval)
+            persistTasks()
 
         case .watchUpdate(let action, let watchData, let alertData):
             switch action {
@@ -204,6 +218,7 @@ final class TaskFeedViewModel: ObservableObject {
             default:
                 break
             }
+            persistWatchlists()
 
         case .watchlistAlert(let alert):
             alerts.insert(alert, at: 0)
@@ -212,6 +227,7 @@ final class TaskFeedViewModel: ObservableObject {
             NotificationManager.shared.sendLocalMonitoringNotification(
                 taskId: alert.watchId, title: alert.title, body: alert.message
             )
+            persistWatchlists()
 
         default:
             break
@@ -224,6 +240,7 @@ final class TaskFeedViewModel: ObservableObject {
         if let i = alerts.firstIndex(where: { $0.id == identifier || $0.watchId == identifier }) {
             alerts[i].isRead = true
             webSocket.markWatchlistAlertsRead(alertIds: [alerts[i].id])
+            persistWatchlists()
         }
     }
 
@@ -232,6 +249,7 @@ final class TaskFeedViewModel: ObservableObject {
             alerts[i].isRead = true
         }
         webSocket.markAllWatchlistAlertsRead()
+        persistWatchlists()
     }
 
     func dismissBanner() {
@@ -304,6 +322,56 @@ final class TaskFeedViewModel: ObservableObject {
             }
         }
         return nil
+    }
+
+    // MARK: - Persistence
+
+    /// Load persisted data from disk. Uses isEmpty guards to avoid overwriting live WebSocket data.
+    func loadPersistedData() async {
+        do {
+            let taskData = try await taskStore.load()
+            if tasks.isEmpty { tasks = taskData.tasks }
+            if pendingApprovals.isEmpty { pendingApprovals = taskData.pendingApprovals }
+        } catch {
+            log("failed to load tasks: \(error.localizedDescription)")
+        }
+        do {
+            let watchData = try await watchlistStore.load()
+            if watchItems.isEmpty { watchItems = watchData.items }
+            if alerts.isEmpty { alerts = watchData.alerts }
+        } catch {
+            log("failed to load watchlists: \(error.localizedDescription)")
+        }
+    }
+
+    private func persistTasks() {
+        let currentTasks = tasks
+        let currentApprovals = pendingApprovals
+        Task {
+            do {
+                try await taskStore.save(tasks: currentTasks, pendingApprovals: currentApprovals)
+            } catch {
+                log("failed to persist tasks: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func persistWatchlists() {
+        let currentItems = watchItems
+        let currentAlerts = alerts
+        Task {
+            do {
+                try await watchlistStore.save(items: currentItems, alerts: currentAlerts)
+            } catch {
+                log("failed to persist watchlists: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func log(_ message: String) {
+        #if DEBUG
+        print("[TaskFeedViewModel] \(message)")
+        #endif
     }
 
     // MARK: - Mock data

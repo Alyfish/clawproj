@@ -17,6 +17,7 @@ final class ApprovalsViewModel: ObservableObject {
     // MARK: - Private
 
     private let webSocket: any WebSocketServiceProtocol
+    private let approvalStore: ApprovalStore
     private let notificationManager: NotificationManager
     private var cancellables = Set<AnyCancellable>()
     private var deepLinkCancellable: AnyCancellable?
@@ -25,9 +26,11 @@ final class ApprovalsViewModel: ObservableObject {
 
     init(
         webSocket: any WebSocketServiceProtocol,
+        approvalStore: ApprovalStore = ApprovalStore(),
         notificationManager: NotificationManager? = nil
     ) {
         self.webSocket = webSocket
+        self.approvalStore = approvalStore
         self.notificationManager = notificationManager ?? NotificationManager.shared
 
         webSocket.streamEventPublisher
@@ -84,6 +87,7 @@ final class ApprovalsViewModel: ObservableObject {
 
             if !pending.contains(where: { $0.id == id }) {
                 pending.append(request)
+                persistApprovals()
             }
 
             notificationManager.sendLocalApprovalNotification(
@@ -121,10 +125,42 @@ final class ApprovalsViewModel: ObservableObject {
         history.insert(resolved, at: 0)
 
         notificationManager.updateBadge(count: pendingCount)
+        persistApprovals()
 
         if selectedApproval?.id == approvalId {
             selectedApproval = nil
         }
+    }
+
+    // MARK: - Persistence
+
+    /// Load persisted data from disk. Uses isEmpty guards to avoid overwriting live WebSocket data.
+    func loadPersistedData() async {
+        do {
+            let data = try await approvalStore.load()
+            if pending.isEmpty { pending = data.pending }
+            if history.isEmpty { history = data.history }
+        } catch {
+            log("failed to load approvals: \(error.localizedDescription)")
+        }
+    }
+
+    private func persistApprovals() {
+        let currentPending = pending
+        let currentHistory = history
+        Task {
+            do {
+                try await approvalStore.save(pending: currentPending, history: currentHistory)
+            } catch {
+                log("failed to persist approvals: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func log(_ message: String) {
+        #if DEBUG
+        print("[ApprovalsViewModel] \(message)")
+        #endif
     }
 
     // MARK: - Mock data (until real gateway is connected)

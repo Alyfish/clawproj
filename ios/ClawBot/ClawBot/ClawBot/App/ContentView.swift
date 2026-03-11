@@ -10,8 +10,15 @@ struct ContentView: View {
     init() {
         let ws = WebSocketService()
         _webSocket = StateObject(wrappedValue: ws)
-        _taskViewModel = StateObject(wrappedValue: TaskFeedViewModel(webSocket: ws))
-        _approvalsViewModel = StateObject(wrappedValue: ApprovalsViewModel(webSocket: ws))
+        _taskViewModel = StateObject(wrappedValue: TaskFeedViewModel(
+            webSocket: ws,
+            taskStore: TaskStore(),
+            watchlistStore: WatchlistStore()
+        ))
+        _approvalsViewModel = StateObject(wrappedValue: ApprovalsViewModel(
+            webSocket: ws,
+            approvalStore: ApprovalStore()
+        ))
     }
 
     var body: some View {
@@ -61,6 +68,10 @@ struct ContentView: View {
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: taskViewModel.bannerAlert != nil)
+        .task {
+            await taskViewModel.loadPersistedData()
+            await approvalsViewModel.loadPersistedData()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .deepLinkToWatchlist)) { notification in
             if let watchId = notification.userInfo?["watchId"] as? String {
                 selectedTab = 3
