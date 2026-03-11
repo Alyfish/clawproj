@@ -293,12 +293,13 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
     }
 
     private func handleMonitoringAction(userInfo: [AnyHashable: Any]) {
-        guard let taskId = userInfo["taskId"] as? String else { return }
-        NotificationCenter.default.post(
-            name: .deepLinkToTask,
-            object: nil,
-            userInfo: ["taskId": taskId]
-        )
+        if let watchId = userInfo["watchId"] as? String ?? userInfo["taskId"] as? String {
+            NotificationCenter.default.post(
+                name: .deepLinkToWatchlist,
+                object: nil,
+                userInfo: ["watchId": watchId]
+            )
+        }
     }
 
     private func handleTaskAction(userInfo: [AnyHashable: Any]) {
@@ -311,12 +312,13 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
     }
 
     private func handlePriceAlertAction(userInfo: [AnyHashable: Any]) {
-        guard let taskId = userInfo["taskId"] as? String else { return }
-        NotificationCenter.default.post(
-            name: .deepLinkToTask,
-            object: nil,
-            userInfo: ["taskId": taskId]
-        )
+        if let watchId = userInfo["watchId"] as? String ?? userInfo["taskId"] as? String {
+            NotificationCenter.default.post(
+                name: .deepLinkToWatchlist,
+                object: nil,
+                userInfo: ["watchId": watchId]
+            )
+        }
     }
 }
 
@@ -325,4 +327,5 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
 extension Notification.Name {
     static let deepLinkToApproval = Notification.Name("deepLinkToApproval")
     static let deepLinkToTask = Notification.Name("deepLinkToTask")
+    static let deepLinkToWatchlist = Notification.Name("deepLinkToWatchlist")
 }

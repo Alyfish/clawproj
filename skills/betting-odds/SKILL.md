@@ -16,6 +16,37 @@ tags: [sports, betting, odds]
 
 # Betting Odds Research
 
+## Search Strategy (v2.1 — bash-first)
+
+ALWAYS search via SearXNG before using the browser:
+
+### Step 1: Search (bash, ~2 seconds)
+```bash
+curl -s "http://searxng:8080/search?q=odds+Lakers+vs+Celtics+tonight+spread+moneyline&format=json" \
+  | jq '.results[:10] | .[] | {title, url, snippet}' \
+  > /workspace/data/odds-search.json
+```
+
+### Step 2: Summarize results
+```bash
+jq -r '.[] | "\(.title) — \(.url)"' /workspace/data/odds-search.json
+```
+
+### Step 3: Deep dive (browser, ONLY if needed)
+Only open the browser to:
+- Click into a specific odds page for live line updates
+- Compare lines across multiple sportsbooks on one page
+- Place a bet (requires approval before confirming wager)
+
+DO NOT navigate to ESPN or OddsShark and browse page-by-page. That is slow and unnecessary.
+
+### Step 4: Save & present
+- Save parsed odds to `/workspace/data/odds-results.json`
+- Present as PickCards via create_card
+- Keep only the card data in conversation — full odds data stays on disk
+
+> **Execution preference:** Use bash_execute with curl/jq over web_search/http_request for composable, single-call execution.
+
 Sports betting RESEARCH assistant — fetch live odds, compare lines across
 bookmakers, track movement, and calculate parlay payouts. Information only.
 
@@ -636,3 +667,9 @@ probabilities per book → remove vig → calculate EV → flag positive EV pick
 8. **Data attribution** — always cite "The Odds API" as the data source
 9. **American odds default** — use American format unless user specifies decimal
 10. **Card schema compliance** — PickCard output must match `shared/types/cards.ts`
+
+## Output Format
+
+When your bash command finds results, end output with CARDS_JSON: followed by a JSON array. Cards auto-render on the user's phone — no need to call create_card separately.
+
+CARDS_JSON:[{"type":"pick","title":"Lakers -3.5 vs Celtics","metadata":{"matchup":"LAL vs BOS","line":"-3.5","odds":"-110","impliedOdds":"52.4%"},"actions":["Watch Line","Share"]}]

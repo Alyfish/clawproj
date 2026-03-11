@@ -387,7 +387,13 @@ class CDPBrowserTool(BaseTool):
     # ── Connection management ─────────────────────────────────────
 
     async def _ensure_connected(self) -> None:
-        """Connect to the remote browser via CDP. Reconnects if disconnected."""
+        """Connect to the remote browser via CDP. Reconnects if disconnected.
+
+        Handles the 'browser already running' error that occurs when a
+        previous agent session left a stale Chrome instance using the
+        same user-data-dir (profile). Recovery: connect without profile
+        args, close that browser, then retry with the profile URL.
+        """
         if self._browser is not None and self._browser.is_connected():
             return
 
@@ -412,6 +418,8 @@ class CDPBrowserTool(BaseTool):
                 return
             except Exception as e:
                 last_error = e
+                error_msg = str(e).lower()
+
                 # Clean up failed attempt
                 if self._playwright:
                     try:
@@ -420,6 +428,21 @@ class CDPBrowserTool(BaseTool):
                         pass
                     self._playwright = None
                 self._browser = None
+
+                # Recovery: "already running" means a stale Chrome instance
+                # is using this profile's user-data-dir. Connect to the base
+                # URL (no profile args) to get a fresh browser, which
+                # effectively clears the stale lock.
+                if "already running" in error_msg and self._cdp_url != self._base_cdp_url:
+                    logger.warning(
+                        "Stale browser lock detected. Recovering by "
+                        "connecting to base URL and resetting profile..."
+                    )
+                    recovered = await self._recover_stale_browser()
+                    if recovered:
+                        # Reset profile so next attempt reconnects cleanly
+                        self._active_profile = None
+                        continue
 
                 delay = self.BASE_RETRY_DELAY * (2 ** attempt)
                 logger.warning(
@@ -434,6 +457,41 @@ class CDPBrowserTool(BaseTool):
         raise RuntimeError(
             f"Failed to connect to browser after {self.MAX_RETRIES} attempts: {last_error}"
         )
+
+    async def _recover_stale_browser(self) -> bool:
+        """Connect to the base CDP URL and close stale browser contexts.
+
+        Returns True if recovery succeeded and a retry should work.
+        """
+        pw = None
+        browser = None
+        try:
+            pw = await _async_playwright().start()
+            browser = await pw.chromium.connect_over_cdp(self._base_cdp_url)
+            # Close all existing contexts to release profile locks
+            for ctx in browser.contexts:
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+            logger.info("Recovered: closed stale browser contexts")
+            # Reset CDP URL to base so next connection starts clean
+            self._cdp_url = self._base_cdp_url
+            return True
+        except Exception as e:
+            logger.warning("Stale browser recovery failed: %s", e)
+            return False
+        finally:
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            if pw:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
 
     async def _get_page(self, session_id: str) -> Any:
         """Get or create a Page for the given session_id."""

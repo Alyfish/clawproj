@@ -61,6 +61,8 @@ class GatewayClient:
         self._pending_requests: dict[str, asyncio.Future[dict]] = {}
         self._reconnect_delay: float = config.reconnect_base_delay
         self._shutdown_event: asyncio.Event = asyncio.Event()
+        self._message_queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._listener_task: asyncio.Task | None = None
 
     # ── Connection Lifecycle ────────────────────────────────────
 
@@ -127,6 +129,7 @@ class GatewayClient:
     async def disconnect(self) -> None:
         """Disconnect from gateway and signal shutdown."""
         self._shutdown_event.set()
+        self._stop_listener()
         if self._ws and self._ws.close_code is None:
             await self._ws.close()
         self._connected = False
@@ -141,6 +144,12 @@ class GatewayClient:
             if not future.done():
                 future.set_result({"error": "DISCONNECTED"})
         self._pending_requests.clear()
+        # Drain the message queue
+        while not self._message_queue.empty():
+            try:
+                self._message_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
         logger.info("Disconnected from gateway")
 
     async def _reconnect(self) -> None:
@@ -165,6 +174,92 @@ class GatewayClient:
         """Whether the WebSocket connection is active."""
         return self._connected and self._ws is not None and self._ws.close_code is None
 
+    # ── Background WebSocket Listener ─────────────────────────
+
+    def _start_listener(self) -> None:
+        """Start the background task that reads from the WebSocket.
+
+        The listener dispatches ``res`` messages to pending futures and
+        enqueues everything else into ``_message_queue`` so that
+        ``receive_messages()`` can yield them.  This decoupling means
+        ``send_request()`` responses are received even while the agent's
+        main loop is blocked executing a tool.
+        """
+        self._stop_listener()
+        self._listener_task = asyncio.get_event_loop().create_task(
+            self._ws_listener(),
+        )
+
+    def _stop_listener(self) -> None:
+        """Cancel the background listener task if running."""
+        if self._listener_task and not self._listener_task.done():
+            self._listener_task.cancel()
+        self._listener_task = None
+
+    async def _ws_listener(self) -> None:
+        """Background coroutine: read WS, dispatch responses, enqueue messages."""
+        try:
+            async for raw in self._ws:  # type: ignore[union-attr]
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Invalid JSON from gateway: %s",
+                        str(raw)[:100],
+                    )
+                    continue
+
+                msg_type = msg.get("type")
+                event = msg.get("event")
+                payload = msg.get("payload", {})
+
+                # ── Response to our requests (futures) ────
+                if msg_type == "res":
+                    req_id = msg.get("id")
+                    if req_id and req_id in self._pending_requests:
+                        future = self._pending_requests.pop(req_id)
+                        if not future.done():
+                            future.set_result(payload)
+                    continue
+
+                # ── Approval resolved (futures) ───────────
+                if msg_type == "event" and event == "approval/resolved":
+                    approval_id = payload.get("approvalId")
+                    if approval_id and approval_id in self._pending_approvals:
+                        future = self._pending_approvals.pop(approval_id)
+                        if not future.done():
+                            decision = payload.get("decision", "denied")
+                            future.set_result({
+                                "approved": decision == "approved",
+                                "message": "",
+                            })
+                    continue
+
+                # ── Approval timeout (futures) ────────────
+                if msg_type == "event" and event == "approval/timeout":
+                    approval_id = payload.get("approvalId")
+                    if approval_id and approval_id in self._pending_approvals:
+                        future = self._pending_approvals.pop(approval_id)
+                        if not future.done():
+                            future.set_result({
+                                "approved": False,
+                                "message": "Approval timed out",
+                            })
+                    continue
+
+                # ── Everything else → enqueue for receive_messages() ──
+                await self._message_queue.put(msg)
+
+        except asyncio.CancelledError:
+            return
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning("WS listener: connection closed: %s", e)
+            # Signal reconnect by pushing a sentinel
+            await self._message_queue.put({"__reconnect__": True})
+        except Exception as e:
+            logger.error("WS listener error: %s", e)
+            await self._message_queue.put({"__reconnect__": True})
+
     # ── Message Receiving ───────────────────────────────────────
 
     async def receive_messages(self) -> AsyncGenerator[dict, None]:
@@ -179,128 +274,103 @@ class GatewayClient:
                 "attachments": list,
             }
 
-        Also handles internally:
-        - ``approval/resolved`` events → resolves pending futures
-        - ``task/stop`` events → yields ``__STOP__`` sentinel
-        - Reconnection on disconnect
+        The background ``_ws_listener`` task reads the WebSocket and
+        resolves ``res`` / ``approval`` futures directly.  Chat messages
+        and other events are placed on ``_message_queue`` and consumed
+        here.  This architecture ensures ``send_request()`` never
+        deadlocks waiting for a response that sits unread on the socket.
         """
         while not self._shutdown_event.is_set():
             if not self.is_connected:
                 try:
                     await self.connect()
+                    self._start_listener()
                 except Exception as e:
                     logger.error("Connection failed: %s", e)
                     await self._reconnect()
+                    if self.is_connected:
+                        self._start_listener()
                     continue
 
+            # If listener not running (first call after external connect()), start it
+            if self._listener_task is None or self._listener_task.done():
+                self._start_listener()
+
             try:
-                async for raw in self._ws:  # type: ignore[union-attr]
-                    try:
-                        msg = json.loads(raw)
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            "Invalid JSON from gateway: %s",
-                            str(raw)[:100],
-                        )
-                        continue
+                msg = await self._message_queue.get()
+            except asyncio.CancelledError:
+                return
 
-                    msg_type = msg.get("type")
-                    event = msg.get("event")
-                    payload = msg.get("payload", {})
-
-                    # ── User chat message ────────────────────
-                    if msg_type == "event" and event == "chat/message:new":
-                        yield {
-                            "text": payload.get("text", ""),
-                            "session_id": payload.get("sessionId", "default"),
-                            "message_id": str(uuid.uuid4()),
-                            "attachments": payload.get("attachments", []),
-                        }
-
-                    # ── Approval resolved ────────────────────
-                    elif msg_type == "event" and event == "approval/resolved":
-                        approval_id = payload.get("approvalId")
-                        if approval_id and approval_id in self._pending_approvals:
-                            future = self._pending_approvals.pop(approval_id)
-                            if not future.done():
-                                decision = payload.get("decision", "denied")
-                                future.set_result({
-                                    "approved": decision == "approved",
-                                    "message": "",
-                                })
-
-                    # ── Approval timeout ─────────────────────
-                    elif msg_type == "event" and event == "approval/timeout":
-                        approval_id = payload.get("approvalId")
-                        if approval_id and approval_id in self._pending_approvals:
-                            future = self._pending_approvals.pop(approval_id)
-                            if not future.done():
-                                future.set_result({
-                                    "approved": False,
-                                    "message": "Approval timed out",
-                                })
-
-                    # ── Task stop ────────────────────────────
-                    elif msg_type == "event" and event == "task/stop":
-                        yield {
-                            "text": "__STOP__",
-                            "session_id": payload.get(
-                                "sessionId", "default",
-                            ),
-                            "message_id": "stop",
-                            "attachments": [],
-                        }
-
-                    # ── Login events from iOS ─────────────────
-                    elif msg_type == "event" and event in (
-                        "login/input", "login/click", "login/done",
-                    ):
-                        yield {
-                            "text": f"__LOGIN_{event.split('/')[1].upper()}__",
-                            "session_id": payload.get("sessionId", "default"),
-                            "message_id": str(uuid.uuid4()),
-                            "attachments": [],
-                            "login_event": event,
-                            "login_payload": payload,
-                        }
-
-                    # ── Schedule task trigger ──────────────
-                    elif msg_type == "event" and event == "schedule/task:trigger":
-                        yield {
-                            "text": "__SCHEDULE_TRIGGER__",
-                            "session_id": payload.get("sessionId", "default"),
-                            "message_id": str(uuid.uuid4()),
-                            "attachments": [],
-                            "schedule_trigger": payload,
-                        }
-
-                    # ── Response to our requests ──────────
-                    elif msg_type == "res":
-                        req_id = msg.get("id")
-                        if req_id and req_id in self._pending_requests:
-                            future = self._pending_requests.pop(req_id)
-                            if not future.done():
-                                future.set_result(payload)
-
-                    else:
-                        logger.debug(
-                            "Ignoring message: type=%s event=%s",
-                            msg_type,
-                            event,
-                        )
-
-            except websockets.exceptions.ConnectionClosed as e:
-                logger.warning("Gateway connection closed: %s", e)
-                await self._reconnect()
-            except Exception as e:
-                logger.error("Error receiving messages: %s", e)
-                await self._reconnect()
-            else:
-                # websockets v15+ can exit iteration without raising
-                # ConnectionClosed on clean server close
-                logger.warning("WebSocket iteration ended (connection lost silently)")
+            # ── Reconnect sentinel from listener ──────
+            if msg.get("__reconnect__"):
                 self._connected = False
                 self._ws = None
+                await self._reconnect()
+                if self.is_connected:
+                    self._start_listener()
+                continue
+
+            msg_type = msg.get("type")
+            event = msg.get("event")
+            payload = msg.get("payload", {})
+
+            # ── User chat message ────────────────────
+            if msg_type == "event" and event == "chat/message:new":
+                yield {
+                    "text": payload.get("text", ""),
+                    "session_id": payload.get("sessionId", "default"),
+                    "message_id": str(uuid.uuid4()),
+                    "attachments": payload.get("attachments", []),
+                }
+
+            # ── Task stop ────────────────────────────
+            elif msg_type == "event" and event == "task/stop":
+                yield {
+                    "text": "__STOP__",
+                    "session_id": payload.get("sessionId", "default"),
+                    "message_id": "stop",
+                    "attachments": [],
+                }
+
+            # ── Login events from iOS ─────────────────
+            elif msg_type == "event" and event in (
+                "login/input", "login/click", "login/done",
+            ):
+                yield {
+                    "text": f"__LOGIN_{event.split('/')[1].upper()}__",
+                    "session_id": payload.get("sessionId", "default"),
+                    "message_id": str(uuid.uuid4()),
+                    "attachments": [],
+                    "login_event": event,
+                    "login_payload": payload,
+                }
+
+            # ── Schedule task trigger ──────────────
+            elif msg_type == "event" and event == "schedule/task:trigger":
+                yield {
+                    "text": "__SCHEDULE_TRIGGER__",
+                    "session_id": payload.get("sessionId", "default"),
+                    "message_id": str(uuid.uuid4()),
+                    "attachments": [],
+                    "schedule_trigger": payload,
+                }
+
+            # ── Card action from iOS ──────────────
+            elif msg_type == "event" and event == "card/action":
+                yield {
+                    "text": "__CARD_ACTION__",
+                    "session_id": payload.get("sessionId", "default"),
+                    "message_id": str(uuid.uuid4()),
+                    "attachments": [],
+                    "card_action": payload,
+                }
+
+            else:
+                logger.debug(
+                    "Ignoring message: type=%s event=%s",
+                    msg_type,
+                    event,
+                )
 
     # ── Event Emission ──────────────────────────────────────────
 
@@ -411,6 +481,36 @@ class GatewayClient:
             "profile": profile,
             "authenticated": authenticated,
             "domain": domain,
+        })
+
+    async def emit_watchlist_alert(
+        self,
+        watch_id: str,
+        alert_type: str,
+        title: str,
+        message: str,
+        item: str,
+        source: str,
+        previous_value: str,
+        current_value: str,
+        threshold: str = "",
+        url: str = "",
+        card_type: str = "generic",
+    ) -> None:
+        """Emit a watchlist alert event to iOS via the gateway."""
+        await self.emit_event("watchlist/alert", {
+            "watchId": watch_id,
+            "alertType": alert_type,
+            "title": title,
+            "message": message,
+            "item": item,
+            "source": source,
+            "previousValue": str(previous_value),
+            "currentValue": str(current_value),
+            "threshold": str(threshold),
+            "url": url,
+            "cardType": card_type,
+            "timestamp": _iso_now(),
         })
 
     # ── Approval Flow ───────────────────────────────────────────
@@ -585,6 +685,13 @@ class MockGatewayClient:
     ) -> None:
         icon = "\u2705" if authenticated else "\u274c"
         print(f"\n  {icon} Login flow ended: {domain} (authenticated={authenticated})")
+
+    async def emit_watchlist_alert(
+        self, watch_id: str, alert_type: str, title: str, message: str,
+        item: str, source: str, previous_value: str, current_value: str,
+        threshold: str = "", url: str = "", card_type: str = "generic",
+    ) -> None:
+        print(f"\n  \U0001f514 Alert [{alert_type}]: {title} — {message}")
 
     async def request_approval(
         self,

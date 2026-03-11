@@ -10,6 +10,37 @@ tags: [travel, flights, booking, price-monitoring]
 
 # Flight Search
 
+## Search Strategy (v2.1 — bash-first)
+
+ALWAYS search via SearXNG before using the browser:
+
+### Step 1: Search (bash, ~2 seconds)
+```bash
+curl -s "http://searxng:8080/search?q=flights+NYC+to+LAX+round+trip+june&format=json" \
+  | jq '.results[:10] | .[] | {title, url, snippet}' \
+  > /workspace/data/flight-search.json
+```
+
+### Step 2: Summarize results
+```bash
+jq -r '.[] | "\(.title) — \(.url)"' /workspace/data/flight-search.json
+```
+
+### Step 3: Deep dive (browser, ONLY if needed)
+Only open the browser to:
+- Click into a specific flight result for exact pricing/times
+- Complete a booking flow (requires approval before payment)
+- Extract detailed itinerary info not in the search snippet
+
+DO NOT navigate to Google Flights or Kayak and search manually. That is slow and unnecessary.
+
+### Step 4: Save & present
+- Save parsed flight offers to `/workspace/data/flight-results.json`
+- Present as FlightCards via create_card
+- Keep only the card data in conversation — full flight data stays on disk
+
+> **Execution preference:** Use bash_execute with curl/jq over web_search/http_request for composable, single-call execution.
+
 ## Context
 
 This skill enables ClawBot to search for flights, compare prices across providers, rank results by user preferences, and optionally monitor for price drops.
@@ -664,3 +695,9 @@ Then present FlightCards exactly as you would for real results (with ranking, so
 7. **Date handling:** Always use ISO 8601 format (YYYY-MM-DD) for API calls. Convert relative dates ("next Friday", "in 2 weeks") to absolute dates. Always show the resolved date to the user for confirmation.
 
 8. **Multi-city/complex itineraries:** This skill handles one-way and round-trip searches. For multi-city itineraries, make separate searches for each leg and present them together.
+
+## Output Format
+
+When your bash command finds results, end output with CARDS_JSON: followed by a JSON array. Cards auto-render on the user's phone — no need to call create_card separately.
+
+CARDS_JSON:[{"type":"flight","title":"SFO → LHR $450","metadata":{"airline":"BA","departure":"10:30","arrival":"06:30+1","duration":"11h","price":"$450","route":"SFO → LHR"},"actions":["Book","Watch Price","Share"]}]

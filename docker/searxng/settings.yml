@@ -1,0 +1,35 @@
+use_default_settings: true
+server:
+  secret_key: "e29fefe25fcbddf547fa8438e917c5164b9d2d893b67fdb2bcecfcd1e53b7ad7"
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  formats:
+    - html
+    - json
+outgoing:
+  request_timeout: 5.0
+  max_request_timeout: 10.0
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+  - name: bing
+    engine: bing
+    shortcut: b
+  - name: brave
+    engine: brave
+    shortcut: br
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: w
+  - name: startpage
+    engine: startpage
+    shortcut: sp

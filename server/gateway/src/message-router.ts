@@ -43,6 +43,12 @@ const LoginDoneSchema = z.object({
   profile: z.string().min(1),
 });
 
+const CardActionSchema = z.object({
+  action: z.string().min(1),
+  cardType: z.string().min(1),
+  cardData: z.record(z.unknown()).default({}),
+});
+
 const DeviceRegisterPushSchema = z.object({
   platform: z.enum(['ios']),
   deviceToken: z.string().min(10).max(200),
@@ -59,6 +65,11 @@ const ScheduleCreateSchema = z.object({
 
 const ScheduleIdSchema = z.object({
   watchId: z.string().min(1),
+});
+
+const WatchlistMarkReadSchema = z.object({
+  alertIds: z.array(z.string()).optional(),
+  all: z.boolean().optional(),
 });
 
 const WSMessageSchema = z.object({
@@ -200,6 +211,15 @@ export default class MessageRouter {
         break;
       case 'schedule.resume':
         this.handleScheduleResume(client, msg);
+        break;
+      case 'card.action':
+        this.handleCardAction(client, msg);
+        break;
+      case 'watchlist.alerts.fetch':
+        this.handleWatchlistAlertsFetch(client, msg);
+        break;
+      case 'watchlist.alerts.markRead':
+        this.handleWatchlistAlertsMarkRead(client, msg);
         break;
       default:
         this.sendError(
@@ -509,6 +529,72 @@ export default class MessageRouter {
     });
   }
 
+  // ── card.action ──────────────────────────────────────────
+
+  private handleCardAction(client: ConnectedClient, msg: WSMessage): void {
+    const result = CardActionSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid card.action payload: ${result.error.message}`,
+      );
+      return;
+    }
+
+    const { action, cardType, cardData } = result.data;
+
+    const agentNode = this.findAgentNode(client.sessionId);
+    if (!agentNode) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.NO_AGENT,
+        'No agent node connected to this session',
+      );
+      return;
+    }
+
+    log('info', 'card:action_received', {
+      action,
+      cardType,
+      sessionId: client.sessionId,
+    });
+
+    // Forward to agent as event
+    this.sendTo(agentNode.ws, {
+      type: 'event',
+      event: 'card/action',
+      payload: {
+        action,
+        cardType,
+        cardData,
+        sessionId: client.sessionId,
+        from: client.deviceToken,
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    // Store in history
+    const historyEntry: MessageHistoryEntry = {
+      id: uuidv4(),
+      sessionId: client.sessionId,
+      sender: 'operator',
+      message: msg,
+      timestamp: new Date().toISOString(),
+    };
+    this.sessions.addHistory(client.sessionId, historyEntry);
+
+    // Respond to operator
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'card.action',
+      payload: { status: 'received', action },
+    });
+  }
+
   // ── Event handling (from node clients) ───────────────────
 
   private handleEvent(client: ConnectedClient, msg: WSMessage): void {
@@ -556,6 +642,7 @@ export default class MessageRouter {
         'approval/requested',
         'task/update',
         'monitoring/alert',
+        'watchlist/alert',
       ]);
       if (pushableEvents.has(msg.event)) {
         try {
@@ -570,6 +657,20 @@ export default class MessageRouter {
           log('error', 'push_hook:error', { error: message });
         }
       }
+    }
+
+    // Persist watchlist alerts to SQLite for reconnect fetch
+    if (msg.event === 'watchlist/alert' && this.db) {
+      const alert = msg.payload as Record<string, unknown>;
+      this.db.insertWatchlistAlert(
+        uuidv4(),
+        (alert.watchId as string) ?? '',
+        (alert.alertType as string) ?? 'custom',
+        (alert.title as string) ?? '',
+        (alert.message as string) ?? '',
+        JSON.stringify(alert),
+        client.sessionId,
+      );
     }
 
     // Skip history for ephemeral browser login frames (~80KB each)
@@ -783,6 +884,84 @@ export default class MessageRouter {
       id: msg.id,
       method: 'schedule.resume',
       payload: { status: resumed ? 'resumed' : 'not_found' },
+    });
+  }
+
+  // ── watchlist.alerts.fetch ──────────────────────────────
+
+  private handleWatchlistAlertsFetch(
+    client: ConnectedClient,
+    msg: WSMessage,
+  ): void {
+    if (!this.db) {
+      this.sendTo(client.ws, {
+        type: 'res',
+        id: msg.id,
+        method: 'watchlist.alerts.fetch',
+        payload: { alerts: [] },
+      });
+      return;
+    }
+
+    const alerts = this.db.getUnreadAlerts(client.sessionId);
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'watchlist.alerts.fetch',
+      payload: {
+        alerts: alerts.map((a) => ({
+          id: a.id,
+          watchId: a.watch_id,
+          alertType: a.alert_type,
+          title: a.title,
+          message: a.message,
+          payload: JSON.parse(a.payload),
+          createdAt: a.created_at,
+        })),
+      },
+    });
+  }
+
+  // ── watchlist.alerts.markRead ──────────────────────────
+
+  private handleWatchlistAlertsMarkRead(
+    client: ConnectedClient,
+    msg: WSMessage,
+  ): void {
+    if (!this.db) {
+      this.sendTo(client.ws, {
+        type: 'res',
+        id: msg.id,
+        method: 'watchlist.alerts.markRead',
+        payload: { status: 'ok' },
+      });
+      return;
+    }
+
+    const result = WatchlistMarkReadSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid watchlist.alerts.markRead payload: ${result.error.message}`,
+      );
+      return;
+    }
+
+    if (result.data.all) {
+      this.db.markAllAlertsRead(client.sessionId);
+    } else if (result.data.alertIds) {
+      for (const alertId of result.data.alertIds) {
+        this.db.markAlertRead(alertId);
+      }
+    }
+
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'watchlist.alerts.markRead',
+      payload: { status: 'ok' },
     });
   }
 

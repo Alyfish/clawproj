@@ -54,6 +54,14 @@ final class ChatViewModel: ObservableObject {
         webSocket.disconnect()
     }
 
+    func handleCardAction(_ action: String, card: AnyCard) {
+        webSocket.sendCardAction(
+            action: action,
+            cardType: card.cardType,
+            cardData: card.toPayload()
+        )
+    }
+
     func sendMessage(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isStreaming else { return }
@@ -140,8 +148,8 @@ final class ChatViewModel: ObservableObject {
                 messages.append(msg)
                 persistMessages()
             }
-        case .watchUpdate:
-            break // handled by WatchlistViewModel
+        case .watchUpdate, .watchlistAlert:
+            break // handled by TaskFeedViewModel
         case .unknown:
             break
         }

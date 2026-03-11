@@ -2,7 +2,7 @@
 Register all base tools with the ToolRegistry.
 
 Call create_registry() at server startup to get a fully populated
-ToolRegistry with all 8 base tools.
+ToolRegistry with base tools in tiered order.
 
 Usage:
     from server.agent.tools.register import create_registry
@@ -29,6 +29,8 @@ from server.agent.tools.vision import VisionTool
 from server.agent.browser_profiles import BrowserProfileManager
 from server.agent.tools.login_flow import LoginFlowManager
 from server.agent.tools.schedule import ScheduleTool
+from server.agent.tools.emit_alert import EmitAlertTool
+from server.agent.tools.bash_execute import BashExecuteTool
 
 
 def create_registry(
@@ -52,23 +54,16 @@ def create_registry(
     """
     registry = ToolRegistry()
 
-    # Tools with no external dependencies
-    registry.register(CodeExecutionTool())
-    registry.register(FileIoTool())
+    # ── TIER 1: Primary ─────────────────────────────────────────
+    # The agent's default tool. Compose with pipes, scripts, curl.
+    registry.register(BashExecuteTool())
 
-    # Tools that use credential store
-    registry.register(HttpRequestTool(credential_store=credential_store))
-    registry.register(WebSearchTool(credential_store=credential_store))
-
-    # Tools that use gateway client
+    # ── TIER 2: Structured ──────────────────────────────────────
+    # iOS-facing output and system integration. Use when bash
+    # can't produce the right shape (cards, approvals, browser).
     registry.register(CreateCardTool(gateway_client=gateway_client))
     registry.register(RequestApprovalTool(gateway_client=gateway_client))
 
-    # Tools that use memory system
-    registry.register(SaveMemoryTool(memory_system=memory_system))
-    registry.register(SearchMemoryTool(memory_system=memory_system))
-
-    # Browser automation with profile support
     try:
         profile_manager = BrowserProfileManager()
     except OSError:
@@ -84,7 +79,6 @@ def create_registry(
     if profile_manager is not None:
         registry.register(ProfileManagerTool(profile_manager=profile_manager))
 
-    # Login flow manager (delegates to browser + profiles + gateway)
     login_flow_manager = LoginFlowManager(
         browser_tool=browser_tool,
         gateway_client=gateway_client,
@@ -92,11 +86,21 @@ def create_registry(
     )
     browser_tool.set_login_flow_manager(login_flow_manager)
 
-    # Vision extraction (agentic multi-pass pipeline)
     registry.register(VisionTool())
 
-    # Schedule tool (manages watches via gateway scheduler)
     schedule_tool = ScheduleTool(gateway_client=gateway_client)
     registry.register(schedule_tool)
+
+    registry.register(EmitAlertTool(gateway_client=gateway_client))
+
+    # ── TIER 3: Legacy ──────────────────────────────────────────
+    # Same capability as bash but less composable. Kept for
+    # backward compatibility; agent should prefer bash equivalents.
+    registry.register(WebSearchTool(credential_store=credential_store))
+    registry.register(HttpRequestTool(credential_store=credential_store))
+    registry.register(FileIoTool())
+    registry.register(CodeExecutionTool())
+    registry.register(SaveMemoryTool(memory_system=memory_system))
+    registry.register(SearchMemoryTool(memory_system=memory_system))
 
     return registry, login_flow_manager

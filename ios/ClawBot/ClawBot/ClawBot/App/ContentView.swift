@@ -5,6 +5,8 @@ struct ContentView: View {
     @StateObject private var taskViewModel: TaskFeedViewModel
     @StateObject private var approvalsViewModel: ApprovalsViewModel
 
+    @State private var selectedTab = 0
+
     init() {
         let ws = WebSocketService()
         _webSocket = StateObject(wrappedValue: ws)
@@ -13,28 +15,66 @@ struct ContentView: View {
     }
 
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             ChatView(webSocket: webSocket)
                 .tabItem {
                     Label("Chat", systemImage: "bubble.left.and.bubble.right")
                 }
+                .tag(0)
 
             tasksTab
                 .tabItem {
                     Label("Tasks", systemImage: "checklist")
                 }
+                .tag(1)
 
             approvalsTab
                 .tabItem {
                     Label("Approvals", systemImage: "checkmark.shield")
                 }
                 .badge(approvalsViewModel.pendingCount)
+                .tag(2)
 
             watchlistsTab
                 .tabItem {
                     Label("Watchlists", systemImage: "eye")
                 }
                 .badge(taskViewModel.alertBadgeCount)
+                .tag(3)
+        }
+        .overlay(alignment: .top) {
+            if let alert = taskViewModel.bannerAlert {
+                AlertBannerView(
+                    alert: alert,
+                    onTap: {
+                        taskViewModel.markAsRead(alert.id)
+                        taskViewModel.dismissBanner()
+                        selectedTab = 3
+                    },
+                    onDismiss: {
+                        taskViewModel.dismissBanner()
+                    }
+                )
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .padding(.top, 50)
+                .zIndex(100)
+            }
+        }
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: taskViewModel.bannerAlert != nil)
+        .onReceive(NotificationCenter.default.publisher(for: .deepLinkToWatchlist)) { notification in
+            if let watchId = notification.userInfo?["watchId"] as? String {
+                selectedTab = 3
+                taskViewModel.markAsRead(watchId)
+            }
+        }
+        .onChange(of: taskViewModel.bannerAlert?.id) { _, newId in
+            // Auto-dismiss banner after 5 seconds
+            if newId != nil {
+                Task {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    taskViewModel.dismissBanner()
+                }
+            }
         }
     }
 
@@ -88,15 +128,65 @@ struct ContentView: View {
                 items: taskViewModel.watchItems,
                 alerts: taskViewModel.alerts,
                 onToggleActive: { item, active in taskViewModel.toggleWatchActive(item, active: active) },
-                onSelectItem: { item in taskViewModel.selectedWatchItem = item }
+                onSelectItem: { item in taskViewModel.selectedWatchItem = item },
+                onMarkAsRead: { alertId in taskViewModel.markAsRead(alertId) },
+                onMarkAllAsRead: { taskViewModel.markAllAsRead() },
+                onAlertTap: { alert in
+                    if let urlString = alert.url, let url = URL(string: urlString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
             )
             .navigationDestination(item: $taskViewModel.selectedWatchItem) { item in
                 WatchlistDetailView(
                     item: item,
-                    alerts: taskViewModel.alerts
+                    alerts: taskViewModel.alerts,
+                    onMarkAsRead: { alertId in taskViewModel.markAsRead(alertId) }
                 )
             }
         }
+    }
+}
+
+// MARK: - Alert Banner View
+
+private struct AlertBannerView: View {
+    let alert: WatchlistAlert
+    let onTap: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: alert.alertIcon)
+                .foregroundColor(alert.alertColor)
+                .font(.title2)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(alert.title)
+                    .font(.subheadline.bold())
+                    .lineLimit(1)
+                Text(alert.message)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.caption.bold())
+                    .foregroundColor(.secondary)
+                    .padding(6)
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
+        .padding(.horizontal)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
     }
 }
 

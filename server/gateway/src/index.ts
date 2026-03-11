@@ -68,6 +68,16 @@ const pushHook = pushService
             })
             .catch((err) => console.error('Push price error:', err));
           break;
+        case 'watchlist/alert':
+          pushService
+            .sendWatchlistAlert(sessionId, {
+              watchId: (payload.watchId as string) ?? '',
+              title: (payload.title as string) ?? 'Watchlist Alert',
+              body:
+                (payload.message as string) ?? 'A monitored item has changed.',
+            })
+            .catch((err) => console.error('Push watchlist error:', err));
+          break;
       }
     }
   : undefined;
@@ -78,6 +88,16 @@ server.configureRouter(server.getDB(), pushHook);
 // ── Scheduler (cron jobs for autonomous watches) ──
 const scheduler = new Scheduler({
   db: server.getDB(),
+  log: (level, event, data) => {
+    console.log(
+      JSON.stringify({
+        level,
+        event,
+        data,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+  },
   findAgentSession: (_userId: string) => {
     const sessions = server.getSessionManager().listSessions();
     for (const session of sessions) {
@@ -122,6 +142,7 @@ if (pushService) {
       'APPROVAL_REQUEST',
       'TASK_COMPLETE',
       'PRICE_ALERT',
+      'WATCHLIST_ALERT',
       'AGENT_MESSAGE',
     ]),
   });

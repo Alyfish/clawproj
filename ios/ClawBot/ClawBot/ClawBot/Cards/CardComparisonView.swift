@@ -4,6 +4,7 @@ import SwiftUI
 
 struct CardComparisonView: View {
     let cards: [AnyCard]
+    var onCardAction: ((String, AnyCard) -> Void)?
     @State private var currentPage = 0
 
     var body: some View {
@@ -49,16 +50,21 @@ struct CardComparisonView: View {
     private func cardView(for card: AnyCard) -> some View {
         switch card {
         case .flight(let flight):
-            FlightCardView(card: flight)
+            FlightCardView(card: flight, onAction: handler(for: card))
         case .house(let house):
-            HouseCardView(card: house)
+            HouseCardView(card: house, onAction: handler(for: card))
         case .pick(let pick):
-            PickCardView(card: pick)
+            PickCardView(card: pick, onAction: handler(for: card))
         case .doc(let doc):
             DocCardView(card: doc)
         case .base(let base):
-            GenericCardView(card: base)
+            GenericCardView(card: base, onAction: handler(for: card))
         }
+    }
+
+    private func handler(for card: AnyCard) -> CardActionHandler? {
+        guard let onCardAction else { return nil }
+        return { action in onCardAction(action, card) }
     }
 
     // MARK: - Card Height
@@ -66,11 +72,11 @@ struct CardComparisonView: View {
     private var cardHeight: CGFloat {
         guard let first = cards.first else { return 250 }
         switch first {
-        case .flight: return 320
-        case .house: return 480
-        case .pick: return 300
+        case .flight: return 420
+        case .house: return 580
+        case .pick: return 380
         case .doc: return 250
-        case .base: return 350
+        case .base: return 450
         }
     }
 

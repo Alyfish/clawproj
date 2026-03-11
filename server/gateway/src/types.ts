@@ -45,10 +45,13 @@ export type {
   ChatStateDeltaEvent,
   TaskUpdateEvent,
   ApprovalRequestedEvent,
+  WatchlistAlertPayload,
+  WatchlistAlertEvent,
   StreamEvent,
   ChatSendPayload,
   ApprovalResolvePayload,
   TaskStopPayload,
+  CardActionPayload,
 } from '../../../shared/types/gateway.js';
 
 // ── Gateway-local types ───────────────────────────────────────────

@@ -32,6 +32,10 @@ protocol WebSocketServiceProtocol: AnyObject {
     func sendLoginInput(profile: String, ref: Int, text: String)
     func sendLoginClick(profile: String, ref: Int)
     func sendLoginDone(profile: String)
+    func sendCardAction(action: String, cardType: String, cardData: [String: AnyCodable])
+    func fetchWatchlistAlerts()
+    func markWatchlistAlertsRead(alertIds: [String])
+    func markAllWatchlistAlertsRead()
 }
 
 // MARK: - WebSocketService
@@ -181,6 +185,50 @@ final class WebSocketService: ObservableObject, WebSocketServiceProtocol {
         send(message)
     }
 
+    func sendCardAction(action: String, cardType: String, cardData: [String: AnyCodable]) {
+        let message = WSMessage.request(
+            method: "card.action",
+            id: UUID().uuidString,
+            payload: [
+                "action": AnyCodable(action),
+                "cardType": AnyCodable(cardType),
+                "cardData": AnyCodable(cardData.mapValues { $0.value }),
+            ]
+        )
+        send(message)
+    }
+
+    func fetchWatchlistAlerts() {
+        let message = WSMessage.request(
+            method: "watchlist.alerts.fetch",
+            id: UUID().uuidString,
+            payload: [:]
+        )
+        send(message)
+    }
+
+    func markWatchlistAlertsRead(alertIds: [String]) {
+        let message = WSMessage.request(
+            method: "watchlist.alerts.markRead",
+            id: UUID().uuidString,
+            payload: [
+                "alertIds": AnyCodable(alertIds),
+            ]
+        )
+        send(message)
+    }
+
+    func markAllWatchlistAlertsRead() {
+        let message = WSMessage.request(
+            method: "watchlist.alerts.markRead",
+            id: UUID().uuidString,
+            payload: [
+                "all": AnyCodable(true),
+            ]
+        )
+        send(message)
+    }
+
     // MARK: - Private: WebSocket lifecycle
 
     private func openWebSocket(url: URL) {
@@ -266,6 +314,32 @@ final class WebSocketService: ObservableObject, WebSocketServiceProtocol {
             }
             reconnectAttempts = 0
             updateState(.connected)
+            // Fetch any missed watchlist alerts on (re)connect
+            fetchWatchlistAlerts()
+        }
+
+        // Handle watchlist alerts fetch response — emit each as a stream event
+        if wsMessage.type == .res, wsMessage.method == "watchlist.alerts.fetch" {
+            if let alerts = wsMessage.payload?["alerts"]?.value as? [[String: Any]] {
+                for alertDict in alerts {
+                    let payload = alertDict.mapValues { AnyCodable($0) }
+                    let alert = WatchlistAlert(
+                        id: payload["id"]?.stringValue ?? UUID().uuidString,
+                        watchId: payload["watchId"]?.stringValue ?? "",
+                        alertType: payload["alertType"]?.stringValue ?? "general_change",
+                        title: payload["title"]?.stringValue ?? "",
+                        message: payload["message"]?.stringValue ?? "",
+                        source: payload["source"]?.stringValue ?? "",
+                        previousValue: payload["previousValue"]?.stringValue,
+                        currentValue: payload["currentValue"]?.stringValue,
+                        url: payload["url"]?.stringValue,
+                        cardType: payload["cardType"]?.stringValue,
+                        timestamp: payload["createdAt"]?.stringValue
+                            ?? ISO8601DateFormatter().string(from: Date())
+                    )
+                    streamEventSubject.send(.watchlistAlert(alert: alert))
+                }
+            }
         }
 
         // Publish the raw message
@@ -436,6 +510,50 @@ final class MockWebSocketService: WebSocketServiceProtocol {
             id: UUID().uuidString,
             payload: [
                 "profile": AnyCodable(profile),
+            ]
+        )
+        sentMessages.append(message)
+    }
+
+    func sendCardAction(action: String, cardType: String, cardData: [String: AnyCodable]) {
+        let message = WSMessage.request(
+            method: "card.action",
+            id: UUID().uuidString,
+            payload: [
+                "action": AnyCodable(action),
+                "cardType": AnyCodable(cardType),
+                "cardData": AnyCodable(cardData.mapValues { $0.value }),
+            ]
+        )
+        sentMessages.append(message)
+    }
+
+    func fetchWatchlistAlerts() {
+        let message = WSMessage.request(
+            method: "watchlist.alerts.fetch",
+            id: UUID().uuidString,
+            payload: [:]
+        )
+        sentMessages.append(message)
+    }
+
+    func markWatchlistAlertsRead(alertIds: [String]) {
+        let message = WSMessage.request(
+            method: "watchlist.alerts.markRead",
+            id: UUID().uuidString,
+            payload: [
+                "alertIds": AnyCodable(alertIds),
+            ]
+        )
+        sentMessages.append(message)
+    }
+
+    func markAllWatchlistAlertsRead() {
+        let message = WSMessage.request(
+            method: "watchlist.alerts.markRead",
+            id: UUID().uuidString,
+            payload: [
+                "all": AnyCodable(true),
             ]
         )
         sentMessages.append(message)

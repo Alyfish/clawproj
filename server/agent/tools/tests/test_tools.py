@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from server.agent.tools.tool_registry import BaseTool, ToolRegistry, ToolResult
@@ -88,6 +89,7 @@ def mock_credential_store(name: str) -> dict[str, str] | None:
 # ============================================================
 
 EXPECTED_TOOLS = sorted([
+    "bash_execute",
     "browser",
     "code_execution",
     "create_card",
@@ -95,6 +97,7 @@ EXPECTED_TOOLS = sorted([
     "http_request",
     "request_approval",
     "save_memory",
+    "schedule",
     "search_memory",
     "vision",
     "web_search",
@@ -108,17 +111,17 @@ EXPECTED_TOOLS = sorted([
 
 class TestRegistry:
     def test_create_registry_all_tools(self):
-        registry = create_registry()
-        assert registry.count == 10
+        registry, _ = create_registry()
+        assert registry.count == len(EXPECTED_TOOLS)
 
     def test_registry_tool_names(self):
-        registry = create_registry()
+        registry, _ = create_registry()
         assert registry.list_tools() == EXPECTED_TOOLS
 
     def test_registry_definitions_format(self):
-        registry = create_registry()
+        registry, _ = create_registry()
         defs = registry.get_tool_definitions()
-        assert len(defs) == 10
+        assert len(defs) == len(EXPECTED_TOOLS)
         for d in defs:
             assert "name" in d, f"Missing 'name' in {d}"
             assert "description" in d, f"Missing 'description' in {d}"
@@ -129,7 +132,7 @@ class TestRegistry:
 
     @pytest.mark.asyncio
     async def test_registry_execute_unknown_tool(self):
-        registry = create_registry()
+        registry, _ = create_registry()
         result = await registry.execute("nonexistent_tool", "call-1")
         assert result.success is False
         assert "nonexistent_tool" in result.error
@@ -140,16 +143,16 @@ class TestRegistry:
     def test_create_registry_with_dependencies(self):
         gw = MockGatewayClient()
         mem = MockMemorySystem()
-        registry = create_registry(
+        registry, _ = create_registry(
             gateway_client=gw,
             memory_system=mem,
             credential_store=mock_credential_store,
         )
-        assert registry.count == 10
+        assert registry.count == len(EXPECTED_TOOLS)
 
     def test_get_definition_format(self):
         """Each tool's get_definition() returns Claude API tool_use format."""
-        registry = create_registry()
+        registry, _ = create_registry()
         for name in EXPECTED_TOOLS:
             tool = registry.get(name)
             defn = tool.get_definition()
@@ -279,12 +282,26 @@ class TestWebSearchTool:
 
     @pytest.mark.asyncio
     async def test_web_search_no_api_key(self, monkeypatch):
+        """No SerpAPI cred → falls through to SearXNG → connection error."""
         monkeypatch.delenv("CLAWBOT_MOCK_SEARCH", raising=False)
         monkeypatch.delenv("CLAWBOT_CRED_SERPAPI", raising=False)
-        tool = WebSearchTool()
-        result = await tool.execute(query="test query")
+
+        # No SerpAPI cred, and SearXNG not running → ConnectError
+        def no_serpapi(name: str) -> None:
+            return None
+
+        tool = WebSearchTool(credential_store=no_serpapi)
+
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = httpx.ConnectError("Connection refused")
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("server.agent.tools.web_search.httpx.AsyncClient", return_value=mock_client):
+            result = await tool.execute(query="test query")
+
         assert result.success is False
-        assert "CLAWBOT_CRED_SERPAPI" in result.error
+        assert "searxng" in result.error.lower()
 
     @pytest.mark.asyncio
     async def test_web_search_results_format(self, monkeypatch):
@@ -320,6 +337,159 @@ class TestWebSearchTool:
         result = await tool.execute(query="")
         assert result.success is False
         assert "query" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_searxng_mapping(self, monkeypatch):
+        """SearXNG results map content→snippet and sort by score."""
+        monkeypatch.delenv("CLAWBOT_MOCK_SEARCH", raising=False)
+
+        def no_serpapi(name: str) -> None:
+            return None
+
+        tool = WebSearchTool(credential_store=no_serpapi)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "results": [
+                {"title": "Low", "url": "https://low.com", "content": "Low score", "score": 1.0},
+                {"title": "High", "url": "https://high.com", "content": "High score", "score": 5.0},
+                {"title": "Mid", "url": "https://mid.com", "content": "Mid score", "score": 3.0},
+            ]
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("server.agent.tools.web_search.httpx.AsyncClient", return_value=mock_client):
+            result = await tool.execute(query="test", num_results=3)
+
+        assert result.success is True
+        assert len(result.output) == 3
+        # Sorted by score descending
+        assert result.output[0] == {"title": "High", "url": "https://high.com", "snippet": "High score"}
+        assert result.output[1] == {"title": "Mid", "url": "https://mid.com", "snippet": "Mid score"}
+        assert result.output[2] == {"title": "Low", "url": "https://low.com", "snippet": "Low score"}
+
+    @pytest.mark.asyncio
+    async def test_serpapi_priority(self, monkeypatch):
+        """When SerpAPI cred exists, SerpAPI is used (not SearXNG)."""
+        monkeypatch.delenv("CLAWBOT_MOCK_SEARCH", raising=False)
+        tool = WebSearchTool(credential_store=mock_credential_store)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "organic_results": [
+                {"title": "SerpAPI Result", "link": "https://serp.com", "snippet": "From SerpAPI"},
+            ]
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("server.agent.tools.web_search.httpx.AsyncClient", return_value=mock_client):
+            result = await tool.execute(query="test", num_results=1)
+
+        assert result.success is True
+        assert result.output[0]["title"] == "SerpAPI Result"
+        # Only one GET call (SerpAPI), not two
+        assert mock_client.get.call_count == 1
+        call_url = mock_client.get.call_args[0][0]
+        assert "serpapi.com" in call_url
+
+    @pytest.mark.asyncio
+    async def test_serpapi_fallthrough(self, monkeypatch):
+        """SerpAPI fails → falls through to SearXNG successfully."""
+        monkeypatch.delenv("CLAWBOT_MOCK_SEARCH", raising=False)
+        tool = WebSearchTool(credential_store=mock_credential_store)
+
+        call_count = {"n": 0}
+
+        serpapi_response = MagicMock()
+        serpapi_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500", request=MagicMock(), response=MagicMock(status_code=500)
+        )
+
+        searxng_response = MagicMock()
+        searxng_response.status_code = 200
+        searxng_response.json.return_value = {
+            "results": [
+                {"title": "SearXNG Result", "url": "https://sxng.com", "content": "Fallback", "score": 1.0},
+            ]
+        }
+        searxng_response.raise_for_status = MagicMock()
+
+        async def mock_get(url, **kwargs):
+            call_count["n"] += 1
+            if "serpapi.com" in url:
+                return serpapi_response
+            return searxng_response
+
+        mock_client = AsyncMock()
+        mock_client.get = mock_get
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("server.agent.tools.web_search.httpx.AsyncClient", return_value=mock_client):
+            result = await tool.execute(query="test", num_results=1)
+
+        assert result.success is True
+        assert result.output[0] == {"title": "SearXNG Result", "url": "https://sxng.com", "snippet": "Fallback"}
+        assert call_count["n"] == 2  # SerpAPI tried, then SearXNG
+
+    @pytest.mark.asyncio
+    async def test_searxng_timeout(self, monkeypatch):
+        """SearXNG timeout → clean error message."""
+        monkeypatch.delenv("CLAWBOT_MOCK_SEARCH", raising=False)
+
+        def no_serpapi(name: str) -> None:
+            return None
+
+        tool = WebSearchTool(credential_store=no_serpapi)
+
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = httpx.TimeoutException("timed out")
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("server.agent.tools.web_search.httpx.AsyncClient", return_value=mock_client):
+            result = await tool.execute(query="slow query")
+
+        assert result.success is False
+        assert "timed out" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_searxng_empty(self, monkeypatch):
+        """SearXNG returns empty results → empty list, no crash."""
+        monkeypatch.delenv("CLAWBOT_MOCK_SEARCH", raising=False)
+
+        def no_serpapi(name: str) -> None:
+            return None
+
+        tool = WebSearchTool(credential_store=no_serpapi)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"results": []}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("server.agent.tools.web_search.httpx.AsyncClient", return_value=mock_client):
+            result = await tool.execute(query="nothing here")
+
+        assert result.success is True
+        assert result.output == []
 
 
 # ============================================================

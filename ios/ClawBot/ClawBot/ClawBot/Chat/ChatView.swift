@@ -60,7 +60,9 @@ struct ChatView: View {
                         emptyState
                     } else {
                         ForEach(viewModel.messages) { message in
-                            MessageBubbleView(message: message)
+                            MessageBubbleView(message: message, onCardAction: { action, card in
+                                viewModel.handleCardAction(action, card: card)
+                            })
                                 .id(message.id)
                         }
                     }

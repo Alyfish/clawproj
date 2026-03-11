@@ -20,6 +20,7 @@ export type PushNotificationType =
   | 'APPROVAL_REQUEST'
   | 'TASK_COMPLETE'
   | 'PRICE_ALERT'
+  | 'WATCHLIST_ALERT'
   | 'AGENT_MESSAGE';
 
 // iOS category IDs — must match NotificationManager.swift constants
@@ -27,6 +28,7 @@ const CATEGORY_MAP: Record<PushNotificationType, string> = {
   APPROVAL_REQUEST: 'APPROVAL_NEEDED',
   TASK_COMPLETE: 'TASK_COMPLETED',
   PRICE_ALERT: 'PRICE_ALERT',
+  WATCHLIST_ALERT: 'WATCHLIST_ALERT',
   AGENT_MESSAGE: '',
 };
 
@@ -137,6 +139,31 @@ export class PushService {
     });
 
     await this.send(tokens, note, 'PRICE_ALERT');
+  }
+
+  async sendWatchlistAlert(
+    sessionId: string,
+    alert: {
+      watchId: string;
+      title: string;
+      body: string;
+    },
+  ): Promise<void> {
+    const tokens = this.getTokensForSession(sessionId);
+    if (tokens.length === 0) return;
+
+    const note = this.buildNotification('WATCHLIST_ALERT', {
+      title: alert.title,
+      body: alert.body,
+      collapseId: `watchlist-${alert.watchId}`,
+      userInfo: {
+        watchId: alert.watchId,
+        type: 'WATCHLIST_ALERT',
+      },
+      deepLink: `clawbot://watchlist/${alert.watchId}`,
+    });
+
+    await this.send(tokens, note, 'WATCHLIST_ALERT');
   }
 
   async sendAgentMessage(

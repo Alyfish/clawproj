@@ -6,6 +6,8 @@ import SwiftUI
 
 struct GenericCardView: View {
     let card: BaseCard
+    var onAction: CardActionHandler? = nil
+    @State private var loadingAction: String?
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -198,7 +200,12 @@ struct GenericCardView: View {
 
         case .approve:
             Button {
-                // Wired to gateway approval flow in a future session
+                loadingAction = action.id
+                onAction?(action.approvalAction ?? "approve")
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    loadingAction = nil
+                }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.shield")
@@ -212,10 +219,16 @@ struct GenericCardView: View {
                 .background(.green)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             }
+            .disabled(loadingAction != nil)
 
         case .dismiss:
             Button {
-                // Wired to gateway dismiss flow in a future session
+                loadingAction = action.id
+                onAction?("dismiss")
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    loadingAction = nil
+                }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "xmark")
@@ -226,6 +239,7 @@ struct GenericCardView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
             }
+            .disabled(loadingAction != nil)
 
         case .copy:
             Button {
@@ -245,7 +259,12 @@ struct GenericCardView: View {
 
         case .custom:
             Button {
-                // Custom action handling in a future session
+                loadingAction = action.id
+                onAction?(action.id)
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    loadingAction = nil
+                }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "gear")
@@ -260,6 +279,7 @@ struct GenericCardView: View {
                         .stroke(Color(.systemGray4), lineWidth: 1)
                 )
             }
+            .disabled(loadingAction != nil)
         }
     }
 

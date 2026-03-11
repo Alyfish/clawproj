@@ -66,6 +66,12 @@ class AgentConfig:
         "anthropic/claude-haiku-4.5",               # cheap Claude
     ])
 
+    # --- Bash-first agent (v2) ---
+    searxng_url: str = "http://searxng:8080"    # SearXNG search engine
+    workspace_path: str = "/workspace"           # Agent workspace directory
+    bash_timeout: int = 30                       # Bash command timeout (seconds)
+    bash_max_output: int = 51200                 # Bash output truncation (bytes)
+
     # --- Test mode ---
     test_mode: bool = False           # stdin/stdout instead of gateway
     mock_tools: bool = False          # use mock tool results
@@ -112,6 +118,12 @@ class AgentConfig:
         mock_tools_env = os.environ.get("CLAWBOT_MOCK_TOOLS")
         if mock_tools_env is not None:
             self.mock_tools = mock_tools_env.lower() in ("1", "true", "yes")
+
+        # Bash-first agent (v2)
+        self.searxng_url = os.environ.get("CLAWBOT_SEARXNG_URL", self.searxng_url)
+        self.workspace_path = os.environ.get("CLAWBOT_WORKSPACE", self.workspace_path)
+        self.bash_timeout = int(os.environ.get("CLAWBOT_BASH_TIMEOUT", str(self.bash_timeout)))
+        self.bash_max_output = int(os.environ.get("CLAWBOT_BASH_MAX_OUTPUT", str(self.bash_max_output)))
 
     @classmethod
     def from_env(cls) -> AgentConfig:

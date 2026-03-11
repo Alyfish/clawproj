@@ -2,7 +2,8 @@ import SwiftUI
 
 struct WatchlistDetailView: View {
     let item: WatchlistItem
-    let alerts: [MonitoringAlert]
+    let alerts: [WatchlistAlert]
+    var onMarkAsRead: ((String) -> Void)?
 
     var body: some View {
         List {
@@ -34,29 +35,51 @@ struct WatchlistDetailView: View {
                 } else {
                     ForEach(itemAlerts) { alert in
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(alert.message)
-                                .font(.subheadline)
-
-                            // Data preview
-                            if !alert.data.isEmpty {
-                                HStack(spacing: 8) {
-                                    ForEach(alert.data.sorted(by: { $0.key < $1.key }).prefix(3), id: \.key) { key, value in
-                                        Text("\(key): \(value)")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color(.systemGray6))
-                                            .clipShape(Capsule())
-                                    }
+                            HStack {
+                                Image(systemName: alert.alertIcon)
+                                    .foregroundColor(alert.alertColor)
+                                    .font(.caption)
+                                Text(alert.message)
+                                    .font(.subheadline)
+                                if !alert.isRead {
+                                    Spacer()
+                                    Circle()
+                                        .fill(.blue)
+                                        .frame(width: 6, height: 6)
                                 }
                             }
 
-                            Text(relativeTime(alert.timestamp))
+                            // Value change
+                            if let prev = alert.previousValue, let curr = alert.currentValue {
+                                HStack(spacing: 8) {
+                                    Text(prev)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .strikethrough()
+                                    Image(systemName: "arrow.right")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                    Text(curr)
+                                        .font(.caption2)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(alert.alertColor)
+                                }
+                            }
+
+                            Text(alert.relativeTime)
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                         }
                         .padding(.vertical, 4)
+                        .opacity(alert.isRead ? 0.7 : 1.0)
+                        .swipeActions(edge: .trailing) {
+                            if !alert.isRead {
+                                Button("Read") {
+                                    onMarkAsRead?(alert.id)
+                                }
+                                .tint(.blue)
+                            }
+                        }
                     }
                 }
             }
@@ -65,17 +88,10 @@ struct WatchlistDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private var itemAlerts: [MonitoringAlert] {
+    private var itemAlerts: [WatchlistAlert] {
         alerts
-            .filter { $0.watchlistItemId == item.id }
+            .filter { $0.watchId == item.id }
             .sorted { $0.timestamp > $1.timestamp }
-    }
-
-    private func relativeTime(_ iso: String) -> String {
-        guard let date = ISO8601DateFormatter().date(from: iso) else { return iso }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: date, relativeTo: Date())
     }
 }
 

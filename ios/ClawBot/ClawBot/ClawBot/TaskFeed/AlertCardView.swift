@@ -1,77 +1,92 @@
 import SwiftUI
 
-/// Compact alert display — shown in watchlist detail and as standalone notification-style card.
-struct AlertCardView: View {
-    let alert: MonitoringAlert
+/// Compact alert row — used in WatchlistView and WatchlistDetailView.
+struct WatchlistAlertRow: View {
+    let alert: WatchlistAlert
     var onTap: (() -> Void)?
 
     var body: some View {
         Button(action: { onTap?() }) {
-            HStack(spacing: 10) {
+            HStack(spacing: 12) {
                 // Alert icon
-                Image(systemName: alertIcon)
+                Image(systemName: alert.alertIcon)
+                    .foregroundColor(alert.alertColor)
                     .font(.title3)
-                    .foregroundStyle(alertColor)
                     .frame(width: 32, height: 32)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(alert.message)
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
+                VStack(alignment: .leading, spacing: 4) {
+                    // Title + unread dot
+                    HStack {
+                        Text(alert.title)
+                            .font(.subheadline.bold())
+                            .lineLimit(1)
+                        if !alert.isRead {
+                            Circle()
+                                .fill(.blue)
+                                .frame(width: 8, height: 8)
+                        }
+                    }
 
-                    Text(relativeTime(alert.timestamp))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                    // Message
+                    Text(alert.message)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+
+                    // Source + timestamp
+                    HStack {
+                        Text(alert.source.replacingOccurrences(of: "_", with: " ").capitalized)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(alert.relativeTime)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                 }
 
-                Spacer(minLength: 0)
-
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                // Value change (if available)
+                if alert.currentValue != nil || alert.previousValue != nil {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        if let current = alert.currentValue {
+                            Text(current)
+                                .font(.subheadline.bold())
+                                .foregroundColor(alert.alertColor)
+                        }
+                        if let previous = alert.previousValue {
+                            Text(previous)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .strikethrough()
+                        }
+                    }
+                }
             }
             .padding(12)
             .background(Color(.systemBackground))
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .shadow(color: .black.opacity(0.06), radius: 4, x: 0, y: 1)
+            .opacity(alert.isRead ? 0.7 : 1.0)
         }
         .buttonStyle(.plain)
     }
-
-    private var alertIcon: String {
-        if alert.message.lowercased().contains("price") { return "arrow.down.circle.fill" }
-        if alert.message.lowercased().contains("listing") || alert.message.lowercased().contains("new") { return "house.badge.plus" }
-        if alert.message.lowercased().contains("line") || alert.message.lowercased().contains("moved") { return "chart.line.uptrend.xyaxis" }
-        return "bell.badge.fill"
-    }
-
-    private var alertColor: Color {
-        if alert.message.lowercased().contains("drop") || alert.message.lowercased().contains("favor") { return .green }
-        if alert.message.lowercased().contains("new") { return .blue }
-        return .orange
-    }
-
-    private func relativeTime(_ iso: String) -> String {
-        guard let date = ISO8601DateFormatter().date(from: iso) else { return iso }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: date, relativeTo: Date())
-    }
 }
 
-#Preview("Price drop alert") {
-    AlertCardView(alert: .mockPriceDrop)
+#Preview("Price drop (unread)") {
+    WatchlistAlertRow(alert: .mockPriceDrop)
         .padding()
 }
 
-#Preview("New listing alert") {
-    AlertCardView(alert: .mockNewApt)
+#Preview("New listing (unread)") {
+    WatchlistAlertRow(alert: .mockNewApt)
         .padding()
 }
 
-#Preview("Line movement alert") {
-    AlertCardView(alert: .mockLineAlert)
-        .padding()
+#Preview("Line movement (read)") {
+    WatchlistAlertRow(alert: {
+        var a = WatchlistAlert.mockLineAlert
+        a.isRead = true
+        return a
+    }())
+    .padding()
 }

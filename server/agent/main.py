@@ -25,6 +25,7 @@ from .skill_loader import SkillLoader
 from .skill_registry import SkillRegistry
 from .credential_store import CredentialStore
 from .tools.register import create_registry
+from .vfs import VFS
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -64,14 +65,21 @@ async def main(args: argparse.Namespace) -> None:
     print()
 
     # 3. Initialize components
+    # Filesystem
+    vfs = VFS()
+    vfs.init()
+    print(f"   Workspace: {vfs.base}")
+
     # Skills
     skill_loader = SkillLoader(config.skills_dir)
     skill_registry = SkillRegistry(skill_loader)
+    vfs.sync_skills(config.skills_dir)
+    print(f"   Skills synced to: {vfs.base}/skills/")
 
     # Memory
-    memory_manager = MemoryManager(config.memory_dir)
+    memory_manager = MemoryManager(vfs.resolve("memory"))
     memory_adapter = AsyncMemoryAdapter(memory_manager)
-    print(f"   Memory: {config.memory_dir}")
+    print(f"   Memory: {vfs.resolve('memory')}")
 
     # Credentials
     credential_store = CredentialStore(config.credentials_path)
@@ -89,6 +97,7 @@ async def main(args: argparse.Namespace) -> None:
         soul_path=config.soul_path,
         skill_registry=skill_registry,
         memory_system=memory_manager.store,
+        workspace_path=vfs.base,
     )
 
     # Context tools — populate <available_tools> section in system prompt

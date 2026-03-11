@@ -34,7 +34,7 @@ You talk to ClawBot like a person. It figures out what tools to use, executes th
 | **Gateway** | Node.js, TypeScript (strict, ESM), ws, Zod validation |
 | **Agent** | Python 3.9+, Anthropic SDK, httpx, BM25 search |
 | **LLM** | Claude API with streaming + tool use |
-| **Testing** | pytest (225 tests), node:test (12 tests), XCTest |
+| **Testing** | pytest (370+ tests), node:test (12 tests), XCTest |
 
 ## What It Does
 
@@ -83,6 +83,12 @@ clawproj/
 
 ## Getting Started
 
+**Quick Start (Docker):**
+```bash
+cp .env.example .env  # Add your ANTHROPIC_API_KEY
+docker compose -f docker-compose.browser.yml up
+```
+
 **Gateway:**
 ```bash
 cd server/gateway
@@ -103,8 +109,9 @@ Open `ios/ClawBot/ClawBot/ClawBot.xcodeproj` in Xcode and build.
 
 **Tests:**
 ```bash
-python3 -m pytest server/agent/tests/ -v      # 225 tests
+python3 -m pytest server/agent/tests/ -v      # 370+ tests
 cd server/gateway && npx tsx approvals/__tests__/policy-engine.test.ts  # 12 tests
+./scripts/test-integration.sh                  # Integration tests (Docker required)
 ```
 
 ## Safety & Approvals
@@ -135,6 +142,51 @@ The approval system includes a policy engine, async approval lifecycle with time
 - **ChatGPT with plugins** — Tool use + conversation, but ClawBot adds rich cards, approval gates, and a native mobile experience
 - **Apple Intelligence** — On-device AI, but ClawBot is task-execution focused with external API integration
 
+## What's New in v2
+
+### SearXNG — Free Web Search
+Zero-config web search via SearXNG (self-hosted). No API keys required. Falls back automatically when SerpAPI credentials aren't configured.
+
+### Bash Tool — Composable Shell Execution
+The agent's primary tool. Runs commands in a sandboxed container with security blocklists, approval gates for risky operations, and environment filtering (no API key leaks).
+
+### Persistent Workspace
+Mounted Docker volume at `/workspace` with three subdirectories:
+- `/workspace/memory/` — Markdown files with YAML frontmatter
+- `/workspace/scripts/` — Reusable scripts created by the agent
+- `/workspace/data/` — Downloads, API responses, temp files
+
+### Environment Variables
+
+| Variable | Required | Default | Purpose |
+|----------|----------|---------|---------|
+| `ANTHROPIC_API_KEY` | Yes | — | Claude API authentication |
+| `BROWSER_TOKEN` | No | `clawbot-dev` | CDP browser auth token |
+| `CLAWBOT_SEARXNG_URL` | No | `http://searxng:8080` | SearXNG search endpoint |
+| `CLAWBOT_CRED_SERPAPI` | No | — | SerpAPI key (optional, SearXNG is default) |
+| `CLAWBOT_GATEWAY_URL` | No | `ws://gateway:8080` | Gateway WebSocket URL |
+| `BROWSER_PROFILES_DIR` | No | `/data/browser-profiles` | Chrome profile storage |
+| `CLAWBOT_WORKSPACE` | No | `/workspace` | Persistent workspace mount |
+
+### Architecture (4 Containers)
+
+```
+┌─────────────┐     ┌──────────────┐
+│  iOS App    │────▶│   Gateway    │ :8080
+│  (SwiftUI)  │ ws  │  (Node/TS)   │
+└─────────────┘     └──────┬───────┘
+                           │ ws
+                    ┌──────▼───────┐
+                    │    Agent     │
+                    │   (Python)   │
+                    └──┬───────┬───┘
+                       │       │ cdp
+                ┌──────▼──┐ ┌──▼──────────┐
+                │ SearXNG │ │  Chromium   │ :3000
+                │  :8080  │ │ (browserless)│
+                └─────────┘ └─────────────┘
+```
+
 ## Current Status
 
 **Foundation complete. Ready for live API integration.**
@@ -142,5 +194,5 @@ The approval system includes a policy engine, async approval lifecycle with time
 - iOS app: 50+ Swift files, all screens built, zero compilation errors
 - Gateway: WebSocket server with session management + approval engine
 - Agent: Streaming agentic loop with 12+ tools, memory, and credentials
-- Tests: 237 automated tests passing
+- Tests: 370+ automated tests passing
 - Next steps: Wire live flight/apartment/docs APIs, deploy, real-device testing

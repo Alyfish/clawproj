@@ -8,13 +8,15 @@ enum DeepLinkDestination: Equatable {
     case task(id: String)
     case approval(id: String)
     case card(id: String)
+    case watchlist(watchId: String)
     case newTask(sharedItemId: String?)
 
     var description: String {
         switch self {
-        case .task(let id):       return "task/\(id)"
-        case .approval(let id):   return "approval/\(id)"
-        case .card(let id):       return "card/\(id)"
+        case .task(let id):        return "task/\(id)"
+        case .approval(let id):    return "approval/\(id)"
+        case .card(let id):        return "card/\(id)"
+        case .watchlist(let id):   return "watchlist/\(id)"
         case .newTask(let itemId): return "task/new\(itemId.map { "?item=\($0)" } ?? "")"
         }
     }
@@ -67,6 +69,10 @@ class DeepLinkHandler: ObservableObject {
             guard let id = pathSegments.first else { return nil }
             return .card(id: id)
 
+        case "watchlist":
+            guard let watchId = pathSegments.first else { return nil }
+            return .watchlist(watchId: watchId)
+
         case "new":
             // clawbot://new?item=xxx  (alternative short form)
             let itemId = URLComponents(url: url, resolvingAgainstBaseURL: false)?
@@ -98,6 +104,12 @@ class DeepLinkHandler: ObservableObject {
                 name: .deepLinkToApproval,
                 object: nil,
                 userInfo: ["approvalId": id, "action": "open"]
+            )
+        case .watchlist(let watchId):
+            NotificationCenter.default.post(
+                name: .deepLinkToWatchlist,
+                object: nil,
+                userInfo: ["watchId": watchId]
             )
         case .card, .newTask:
             // No legacy notification — handled via pendingDestination observation
@@ -183,6 +195,8 @@ extension DeepLinkHandler {
             return URL(string: "clawbot://approval/\(id)")
         case .card(let id):
             return URL(string: "clawbot://card/\(id)")
+        case .watchlist(let watchId):
+            return URL(string: "clawbot://watchlist/\(watchId)")
         case .newTask(let itemId):
             if let itemId {
                 return URL(string: "clawbot://task/new?item=\(itemId)")

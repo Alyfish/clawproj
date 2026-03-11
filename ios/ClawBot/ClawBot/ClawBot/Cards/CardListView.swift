@@ -6,6 +6,7 @@ struct CardListView: View {
     let cards: [AnyCard]
     var onSave: ((AnyCard) -> Void)?
     var onDismiss: ((AnyCard) -> Void)?
+    var onCardAction: ((String, AnyCard) -> Void)?
 
     var body: some View {
         ScrollView {
@@ -26,16 +27,21 @@ struct CardListView: View {
     private func cardView(for card: AnyCard) -> some View {
         switch card {
         case .flight(let flight):
-            FlightCardView(card: flight)
+            FlightCardView(card: flight, onAction: handler(for: card))
         case .house(let house):
-            HouseCardView(card: house)
+            HouseCardView(card: house, onAction: handler(for: card))
         case .pick(let pick):
-            PickCardView(card: pick)
+            PickCardView(card: pick, onAction: handler(for: card))
         case .doc(let doc):
             DocCardView(card: doc)
         case .base(let base):
-            GenericCardView(card: base)
+            GenericCardView(card: base, onAction: handler(for: card))
         }
+    }
+
+    private func handler(for card: AnyCard) -> CardActionHandler? {
+        guard let onCardAction else { return nil }
+        return { action in onCardAction(action, card) }
     }
 
     private var emptyState: some View {
@@ -62,6 +68,7 @@ struct CardListWithSwipeView: View {
     let cards: [AnyCard]
     var onSave: ((AnyCard) -> Void)?
     var onDismiss: ((AnyCard) -> Void)?
+    var onCardAction: ((String, AnyCard) -> Void)?
 
     var body: some View {
         List {
@@ -97,16 +104,21 @@ struct CardListWithSwipeView: View {
     private func cardView(for card: AnyCard) -> some View {
         switch card {
         case .flight(let flight):
-            FlightCardView(card: flight)
+            FlightCardView(card: flight, onAction: handler(for: card))
         case .house(let house):
-            HouseCardView(card: house)
+            HouseCardView(card: house, onAction: handler(for: card))
         case .pick(let pick):
-            PickCardView(card: pick)
+            PickCardView(card: pick, onAction: handler(for: card))
         case .doc(let doc):
             DocCardView(card: doc)
         case .base(let base):
-            GenericCardView(card: base)
+            GenericCardView(card: base, onAction: handler(for: card))
         }
+    }
+
+    private func handler(for card: AnyCard) -> CardActionHandler? {
+        guard let onCardAction else { return nil }
+        return { action in onCardAction(action, card) }
     }
 }
 

@@ -1,8 +1,10 @@
 """
 ClawBot Web Search Tool
 
-Searches the web for current information using SerpAPI.
-Supports mock mode for development (set CLAWBOT_MOCK_SEARCH=1).
+Searches the web using a provider cascade:
+  1. Mock mode (CLAWBOT_MOCK_SEARCH=1)
+  2. SerpAPI (if CLAWBOT_CRED_SERPAPI credential exists)
+  3. SearXNG (zero-config fallback, default http://searxng:8080)
 
 Design references:
   - OpenManus app/tool/web_search.py (API key validation, result normalization)
@@ -26,13 +28,17 @@ SERPAPI_URL = "https://serpapi.com/search"
 DEFAULT_NUM_RESULTS = 5
 MAX_NUM_RESULTS = 10
 SEARCH_TIMEOUT = 15  # seconds
+SEARXNG_TIMEOUT = 10  # seconds
+DEFAULT_SEARXNG_URL = "http://searxng:8080"
 
 
 class WebSearchTool(BaseTool):
     """Search the web for current information.
 
-    Uses SerpAPI for real searches. Set CLAWBOT_MOCK_SEARCH=1
-    for development without an API key.
+    Provider cascade:
+      1. Mock mode (CLAWBOT_MOCK_SEARCH=1)
+      2. SerpAPI (needs CLAWBOT_CRED_SERPAPI)
+      3. SearXNG (zero-config fallback)
     """
 
     def __init__(
@@ -92,64 +98,125 @@ class WebSearchTool(BaseTool):
             logger.info("Web search (mock): %s", query)
             return self.success(self._mock_results(query, num_results))
 
-        # Look up SerpAPI credential
+        # --- Provider cascade ---
+
+        # 1. Try SerpAPI if credential exists
         cred = self._credential_store("serpapi")
-        if cred is None:
+        if cred is not None:
+            try:
+                return await self._search_serpapi(query, num_results, cred)
+            except Exception as e:
+                logger.warning(
+                    "SerpAPI failed, falling through to SearXNG: %s", e
+                )
+
+        # 2. Try SearXNG (zero-config fallback)
+        try:
+            results = await self._search_searxng(query, num_results)
+            return self.success(results)
+        except httpx.TimeoutException:
+            logger.warning("SearXNG search timed out: '%s'", query)
+            return self.fail("Search timed out (SearXNG)")
+        except httpx.ConnectError:
+            logger.warning("SearXNG not reachable")
             return self.fail(
-                "Web search not configured. "
-                "Set CLAWBOT_CRED_SERPAPI environment variable."
+                "Search unavailable. Is the searxng container running?"
+            )
+        except Exception as e:
+            logger.warning("SearXNG search failed: %s", e)
+            return self.fail(
+                "Search unavailable. Is the searxng container running?"
             )
 
+    # ------------------------------------------------------------------
+    # PROVIDERS
+    # ------------------------------------------------------------------
+
+    async def _search_serpapi(
+        self,
+        query: str,
+        num_results: int,
+        cred: dict[str, str],
+    ) -> ToolResult:
+        """Search via SerpAPI. Raises on failure (caller falls through)."""
         api_key = cred.get("value", "")
 
         start = time.monotonic()
-        try:
-            async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT) as client:
-                response = await client.get(
-                    SERPAPI_URL,
-                    params={
-                        "q": query,
-                        "api_key": api_key,
-                        "num": num_results,
-                    },
-                )
-                response.raise_for_status()
-
-            elapsed_ms = (time.monotonic() - start) * 1000
-            logger.info(
-                "Web search: '%s' -> %d (%.0fms)",
-                query, response.status_code, elapsed_ms,
+        async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT) as client:
+            response = await client.get(
+                SERPAPI_URL,
+                params={
+                    "q": query,
+                    "api_key": api_key,
+                    "num": num_results,
+                },
             )
+            response.raise_for_status()
 
-            data = response.json()
-            organic = data.get("organic_results", [])
+        elapsed_ms = (time.monotonic() - start) * 1000
+        logger.info(
+            "Web search (SerpAPI): '%s' -> %d (%.0fms)",
+            query, response.status_code, elapsed_ms,
+        )
 
-            results = [
-                {
-                    "title": item.get("title", ""),
-                    "url": item.get("link", ""),
-                    "snippet": item.get("snippet", ""),
-                }
-                for item in organic[:num_results]
-            ]
+        data = response.json()
+        organic = data.get("organic_results", [])
 
-            return self.success(results)
+        results = [
+            {
+                "title": item.get("title", ""),
+                "url": item.get("link", ""),
+                "snippet": item.get("snippet", ""),
+            }
+            for item in organic[:num_results]
+        ]
 
-        except httpx.TimeoutException:
-            logger.warning("Web search timed out: '%s'", query)
-            return self.fail("Search timed out")
+        return self.success(results)
 
-        except httpx.HTTPStatusError as e:
-            logger.warning("Web search API error: %d", e.response.status_code)
-            return self.fail(f"Search API error: {e.response.status_code}")
+    async def _search_searxng(
+        self, query: str, num_results: int
+    ) -> list[dict[str, str]]:
+        """Search via SearXNG. Returns list of {title, url, snippet}.
 
-        except (KeyError, TypeError, ValueError) as e:
-            logger.warning("Web search parse error: %s", e)
-            return self.fail("Failed to parse search results")
+        Raises on failure (caller handles exceptions).
+        """
+        searxng_url = os.environ.get(
+            "CLAWBOT_SEARXNG_URL", DEFAULT_SEARXNG_URL
+        )
 
-        except Exception as e:
-            logger.warning("Web search failed: %s", e)
-            return self.fail(f"Web search failed: {type(e).__name__}: {e}")
+        start = time.monotonic()
+        async with httpx.AsyncClient(timeout=SEARXNG_TIMEOUT) as client:
+            response = await client.get(
+                f"{searxng_url}/search",
+                params={
+                    "q": query,
+                    "format": "json",
+                    "categories": "general",
+                    "language": "en",
+                },
+            )
+            response.raise_for_status()
+
+        elapsed_ms = (time.monotonic() - start) * 1000
+        logger.info(
+            "Web search (SearXNG): '%s' -> %d (%.0fms)",
+            query, response.status_code, elapsed_ms,
+        )
+
+        data = response.json()
+        items = data.get("results", [])
+
+        # Sort by score descending (SearXNG provides relevance scores)
+        items.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+        return [
+            {
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "snippet": item.get("content", ""),
+            }
+            for item in items[:num_results]
+        ]
 
     @staticmethod
     def _mock_results(query: str, num: int) -> list[dict[str, str]]:

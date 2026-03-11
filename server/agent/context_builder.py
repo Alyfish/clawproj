@@ -23,6 +23,7 @@ shareAI-lab/learn-claude-code (MIT).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -100,15 +101,55 @@ def format_tool_descriptions(tools: list[dict[str, Any]]) -> str:
 
 
 # ============================================================
+# TOOL ORDERING
+# ============================================================
+
+# Priority map for tool ordering in the system prompt.
+# Claude shows preference for tools listed earlier in the prompt.
+# Lower number = listed first.
+_TOOL_PRIORITY: dict[str, int] = {
+    # Primary (bash-first)
+    "bash_execute": 0,
+    # Structured tools (specific capabilities)
+    "browser": 10,
+    "create_card": 11,
+    "request_approval": 12,
+    "vision": 13,
+    "login_flow": 14,
+    "schedule": 15,
+    "profile_manager": 16,
+    # Legacy tools (fallbacks — listed last)
+    "web_search": 90,
+    "http_request": 91,
+    "file_io": 92,
+    "code_execution": 93,
+    "save_memory": 94,
+    "search_memory": 95,
+    "load_skill": 96,  # deprecated — agent reads skills via bash
+}
+
+
+def _prioritize_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reorder tools for system prompt: bash_execute first, legacy last.
+
+    Tools not in the priority map get a default priority of 50
+    (between structured and legacy tools).
+    """
+    def sort_key(t: dict[str, Any]) -> int:
+        return _TOOL_PRIORITY.get(t.get("name", ""), 50)
+    return sorted(tools, key=sort_key)
+
+
+# ============================================================
 # CONSTANTS
 # ============================================================
 
 # Default token threshold for context compaction.
 # Claude's context window is 200k but we leave headroom for the response.
-DEFAULT_MAX_TOKENS = 150_000
+DEFAULT_MAX_TOKENS = 120_000
 
 # Number of recent messages to always keep when compacting.
-DEFAULT_KEEP_RECENT = 20
+DEFAULT_KEEP_RECENT = 15
 
 # Max characters for SOUL.md — prevents accidentally huge files
 # from consuming the context budget. (Pattern from claw0)
@@ -161,6 +202,7 @@ class ContextBuilder:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         keep_recent: int = DEFAULT_KEEP_RECENT,
         user_timezone: Optional[str] = None,
+        workspace_path: Optional[str] = None,
     ):
         self._soul_path = Path(soul_path)
         self._skill_registry = skill_registry
@@ -169,6 +211,7 @@ class ContextBuilder:
         self._max_tokens = max_tokens
         self._keep_recent = keep_recent
         self._user_timezone = user_timezone
+        self._workspace_path = workspace_path
 
         # Cache SOUL.md content (it doesn't change at runtime)
         self._soul_content = self._load_soul()
@@ -240,16 +283,24 @@ class ContextBuilder:
         # 1. SOUL.md — identity, principles, safety rules
         sections.append(self._soul_content)
 
-        # 2. Available Skills (full mode only)
-        if mode == "full" and self._skill_registry is not None:
-            summaries = self._skill_registry.get_summaries()
-            sections.append(summaries)
+        # 2. Skill index pointer (full mode only)
+        if mode == "full" and self._workspace_path:
+            ws = self._workspace_path
+            skill_hint = (
+                "<skills_index>\n"
+                f"Your domain skills are listed in {ws}/skills/INDEX.md. "
+                f"When a user's request matches a domain, read the skill with: "
+                f"cat {ws}/skills/{{name}}/SKILL.md — then follow its instructions.\n"
+                "</skills_index>"
+            )
+            sections.append(skill_hint)
 
-        # 3. Available Tools
+        # 3. Available Tools (ordered: bash_execute first, legacy last)
         if self._tools:
+            ordered = _prioritize_tools(self._tools)
             tool_section = (
                 "<available_tools>\n"
-                + format_tool_descriptions(self._tools)
+                + format_tool_descriptions(ordered)
                 + "\n</available_tools>"
             )
             sections.append(tool_section)
@@ -366,6 +417,9 @@ class ContextBuilder:
 
         # Stage 2: Micro-compact old tool results (learn-claude-code pattern)
         self.micro_compact(messages)
+
+        # Stage 2.5: Offload remaining large tool results to files
+        self._offload_large_tool_results(messages)
 
         # Inject skill content if a skill was loaded this turn.
         # Injected as a user message with system context marker
@@ -498,6 +552,39 @@ class ContextBuilder:
                 result["content"] = f"[Previous: used {tool_name}]"
 
     # --------------------------------------------------------
+    # TOOL RESULT OFFLOADING
+    # --------------------------------------------------------
+
+    TOOL_RESULT_OFFLOAD_THRESHOLD = 5_000  # 5KB
+
+    def _offload_large_tool_results(self, messages: list[dict]) -> None:
+        """Save tool results >5KB to files and replace inline. In-place."""
+        if not self._workspace_path:
+            return
+        data_dir = Path(self._workspace_path) / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "tool_result":
+                    continue
+                text = part.get("content", "")
+                if not isinstance(text, str) or len(text) <= self.TOOL_RESULT_OFFLOAD_THRESHOLD:
+                    continue
+                content_hash = hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
+                filepath = data_dir / f"tool-result-{content_hash}.json"
+                try:
+                    filepath.write_text(text, encoding="utf-8")
+                    part["content"] = (
+                        f"[Output saved to {filepath} ({len(text)} chars) "
+                        f"— use bash to read specific parts]"
+                    )
+                except OSError as e:
+                    logger.warning("Failed to offload tool result: %s", e)
+
+    # --------------------------------------------------------
     # CONTEXT COMPACTION
     # --------------------------------------------------------
 
@@ -505,24 +592,21 @@ class ContextBuilder:
         self,
         messages: list[dict[str, Any]],
         max_tokens: Optional[int] = None,
+        session_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """
         Compact message history when it exceeds the token threshold.
 
-        Strategy (MVP — no LLM summarization):
-          1. Keep the last N messages (configurable, default 20)
-          2. Replace older messages with a single summary message
-          3. Summarize with tool-aware formatting:
-             - tool_use blocks → '[tool: {name}({input_preview})]'
-             - tool_result blocks → '[tool_result: {name}]'
-             - text content → first 200 chars
-
-        Future improvement: Use a fast/cheap LLM call to generate
-        a proper summary of the compacted messages.
+        Strategy:
+          1. Keep the last N messages (configurable, default 15)
+          2. Save full conversation to a log file (best-effort)
+          3. Replace older messages with a heuristic summary
+          4. Include log file reference for recall
 
         Args:
             messages: Full message history.
             max_tokens: Override the default max_tokens threshold.
+            session_id: Optional session ID (unused — timestamps used for log names).
 
         Returns:
             Compacted message list.
@@ -541,17 +625,22 @@ class ContextBuilder:
         older = messages[:-keep_count]
         recent = messages[-keep_count:]
 
-        # Build a summary of older messages with tool-aware formatting
-        summary_parts = ["[Previous conversation context (compacted):"]
-        for msg in older:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            summary_parts.append(f"  {role}: {self._summarize_content(content)}")
-        summary_parts.append("]")
+        # Save full conversation to log file (best-effort)
+        log_ref = ""
+        if self._workspace_path:
+            log_ref = self._save_compaction_log(older + recent)
+
+        # Build summary with file reference and heuristic
+        summary_text = self._generate_compaction_summary(older, recent)
+        if log_ref:
+            summary_text += (
+                f"\n\n[Full conversation history saved to {log_ref}]\n"
+                f"To recall details: grep -n 'keyword' {log_ref}"
+            )
 
         summary_message = {
             "role": "user",
-            "content": "\n".join(summary_parts),
+            "content": summary_text,
         }
 
         # Ensure alternating roles: summary is "user", so next must be "assistant"
@@ -572,6 +661,85 @@ class ContextBuilder:
         )
 
         return compacted
+
+    def _save_compaction_log(self, messages: list[dict]) -> str:
+        """Save full conversation to a timestamped markdown log file.
+
+        Returns reference string for the summary, or empty on failure.
+        """
+        logs_dir = Path(self._workspace_path) / "logs"  # type: ignore[arg-type]
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        filepath = logs_dir / f"session-{timestamp}.md"
+        try:
+            lines = [f"# Conversation Log — {timestamp}\n"]
+            for msg in messages:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    text_parts: list[str] = []
+                    for block in content:
+                        if isinstance(block, dict):
+                            if block.get("type") == "text":
+                                text_parts.append(block.get("text", ""))
+                            elif block.get("type") == "tool_use":
+                                text_parts.append(f"[tool: {block.get('name')}]")
+                            elif block.get("type") == "tool_result":
+                                text_parts.append(
+                                    f"[tool_result: {str(block.get('content', ''))[:200]}]"
+                                )
+                    content = "\n".join(text_parts)
+                lines.append(f"## {role}\n{content}\n")
+            filepath.write_text("\n".join(lines), encoding="utf-8")
+            return str(filepath)
+        except OSError as e:
+            logger.warning("Failed to save compaction log: %s", e)
+            return ""
+
+    def _generate_compaction_summary(
+        self, older: list[dict], recent: list[dict]
+    ) -> str:
+        """Generate a heuristic summary of compacted messages."""
+        last_user = ""
+        last_assistant = ""
+        workspace_paths: list[str] = []
+
+        for msg in reversed(older):
+            content_str = self._content_to_text(msg.get("content", ""))
+            if not last_user and msg.get("role") == "user":
+                last_user = content_str[:300]
+            if not last_assistant and msg.get("role") == "assistant":
+                last_assistant = content_str[:300]
+            # Collect /workspace/ paths mentioned
+            for word in content_str.split():
+                if "/workspace/" in word or (
+                    self._workspace_path and self._workspace_path in word
+                ):
+                    cleaned = word.strip("[](),\"'")
+                    if cleaned not in workspace_paths:
+                        workspace_paths.append(cleaned)
+
+        parts = ["Summary of earlier conversation:"]
+        if last_user:
+            parts.append(f"- User asked: {last_user}")
+        if last_assistant:
+            parts.append(f"- Assistant responded: {last_assistant}")
+        if workspace_paths:
+            parts.append(f"- Files referenced: {', '.join(workspace_paths[:10])}")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _content_to_text(content: Any) -> str:
+        """Extract plain text from message content (str or list)."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            texts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+            return "\n".join(texts)
+        return str(content)
 
     @staticmethod
     def _summarize_content(content: Any) -> str:

@@ -2,6 +2,8 @@ import SwiftUI
 
 struct FlightCardView: View {
     let card: FlightCard
+    var onAction: CardActionHandler? = nil
+    @State private var loadingAction: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -109,11 +111,45 @@ struct FlightCardView: View {
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .italic()
+
+            // MARK: - Actions
+            if onAction != nil {
+                HStack(spacing: 8) {
+                    CardActionButton(label: "Book This", icon: "airplane", style: .primary,
+                                     isLoading: loadingAction == "book") {
+                        fireAction("book")
+                    }
+                    CardActionButton(label: "Watch Price", icon: "bell", style: .secondary,
+                                     isLoading: loadingAction == "watch_price") {
+                        fireAction("watch_price")
+                    }
+                }
+
+                ShareLink(item: "\(card.airline) \(card.route.from) → \(card.route.to) \(card.price.formatted)") {
+                    HStack(spacing: 6) {
+                        Image(systemName: "square.and.arrow.up")
+                        Text("Share")
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                }
+            }
         }
         .padding()
         .background(Color(.systemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 2)
+    }
+
+    private func fireAction(_ action: String) {
+        loadingAction = action
+        onAction?(action)
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            loadingAction = nil
+        }
     }
 
     private func formattedTime(_ iso: String) -> String {

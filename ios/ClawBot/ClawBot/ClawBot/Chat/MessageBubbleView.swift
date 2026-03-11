@@ -4,6 +4,7 @@ import SwiftUI
 /// as plain text in a blue rounded rect.
 struct MessageBubbleView: View {
     let message: ChatMessage
+    var onCardAction: ((String, AnyCard) -> Void)? = nil
 
     var body: some View {
         HStack {
@@ -57,16 +58,21 @@ struct MessageBubbleView: View {
     private func cardView(for card: AnyCard) -> some View {
         switch card {
         case .flight(let flight):
-            FlightCardView(card: flight)
+            FlightCardView(card: flight, onAction: handler(for: card))
         case .house(let house):
-            HouseCardView(card: house)
+            HouseCardView(card: house, onAction: handler(for: card))
         case .pick(let pick):
-            PickCardView(card: pick)
+            PickCardView(card: pick, onAction: handler(for: card))
         case .doc(let doc):
             DocCardView(card: doc)
         case .base(let base):
-            GenericCardView(card: base)
+            GenericCardView(card: base, onAction: handler(for: card))
         }
+    }
+
+    private func handler(for card: AnyCard) -> CardActionHandler? {
+        guard let onCardAction else { return nil }
+        return { action in onCardAction(action, card) }
     }
 }
 

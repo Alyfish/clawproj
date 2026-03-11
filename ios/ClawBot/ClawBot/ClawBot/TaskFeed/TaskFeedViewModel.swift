@@ -8,14 +8,15 @@ final class TaskFeedViewModel: ObservableObject {
 
     @Published var tasks: [AgentTask] = []
     @Published var watchItems: [WatchlistItem] = []
-    @Published var alerts: [MonitoringAlert] = []
+    @Published var alerts: [WatchlistAlert] = []
+    @Published var bannerAlert: WatchlistAlert?
     @Published var pendingApprovals: [PendingApproval] = []
     @Published var selectedTask: AgentTask?
     @Published var selectedWatchItem: WatchlistItem?
 
     // MARK: - Computed
 
-    var alertBadgeCount: Int { alerts.count }
+    var alertBadgeCount: Int { alerts.filter { !$0.isRead }.count }
 
     // MARK: - Private
 
@@ -169,29 +170,140 @@ final class TaskFeedViewModel: ObservableObject {
                     watchItems[idx] = updated
                 }
             case "alert":
-                if let alertData = alertData,
-                   let id = alertData["id"]?.value as? String,
-                   let watchId = alertData["watchId"]?.value as? String,
-                   let message = alertData["message"]?.value as? String {
-                    let timestamp = alertData["timestamp"]?.value as? String ?? ""
-                    let rawData = alertData["data"]?.value as? [String: Any] ?? [:]
-                    let dataDict = rawData.compactMapValues { "\($0)" } as [String: String]
-                    let alert = MonitoringAlert(
-                        id: id,
-                        watchlistItemId: watchId,
-                        message: message,
-                        data: dataDict,
-                        timestamp: timestamp
-                    )
-                    alerts.insert(alert, at: 0)
-                }
+                let watchId = watchData?["id"]?.value as? String ?? ""
+                let watchDesc = watchData?["description"]?.value as? String ?? ""
+                let skillName = alertData?["type"]?.value as? String
+                    ?? watchData?["type"]?.value as? String ?? ""
+                let dataDict = alertData?["data"]?.value as? [String: Any] ?? [:]
+                let timestamp = alertData?["timestamp"]?.value as? String
+                    ?? ISO8601DateFormatter().string(from: Date())
+
+                let alert = WatchlistAlert(
+                    id: UUID().uuidString,
+                    watchId: watchId,
+                    alertType: Self.inferAlertType(skillName: skillName, data: dataDict),
+                    title: watchDesc,
+                    message: Self.buildAlertMessage(skillName: skillName, data: dataDict, fallback: watchDesc),
+                    source: skillName,
+                    previousValue: Self.extractValue(from: dataDict, keys: ["previousPrice", "oldPrice", "oldSpread", "previousValue"]),
+                    currentValue: Self.extractValue(from: dataDict, keys: ["currentPrice", "newPrice", "price", "newSpread", "currentValue", "rent"]),
+                    url: dataDict["url"] as? String,
+                    cardType: Self.inferCardType(skillName: skillName),
+                    timestamp: timestamp
+                )
+                alerts.insert(alert, at: 0)
+                if alerts.count > 100 { alerts = Array(alerts.prefix(100)) }
+
+                // Show in-app banner
+                bannerAlert = alert
+
+                // Fire local notification
+                NotificationManager.shared.sendLocalMonitoringNotification(
+                    taskId: watchId, title: alert.title, body: alert.message
+                )
             default:
                 break
             }
 
+        case .watchlistAlert(let alert):
+            alerts.insert(alert, at: 0)
+            if alerts.count > 100 { alerts = Array(alerts.prefix(100)) }
+            bannerAlert = alert
+            NotificationManager.shared.sendLocalMonitoringNotification(
+                taskId: alert.watchId, title: alert.title, body: alert.message
+            )
+
         default:
             break
         }
+    }
+
+    // MARK: - Alert actions
+
+    func markAsRead(_ identifier: String) {
+        if let i = alerts.firstIndex(where: { $0.id == identifier || $0.watchId == identifier }) {
+            alerts[i].isRead = true
+            webSocket.markWatchlistAlertsRead(alertIds: [alerts[i].id])
+        }
+    }
+
+    func markAllAsRead() {
+        for i in alerts.indices {
+            alerts[i].isRead = true
+        }
+        webSocket.markAllWatchlistAlertsRead()
+    }
+
+    func dismissBanner() {
+        bannerAlert = nil
+    }
+
+    // MARK: - Alert parsing helpers
+
+    private static func inferAlertType(skillName: String, data: [String: Any]) -> String {
+        switch skillName {
+        case "price_monitor", "flight_search":
+            // Check if price went up or down
+            if let prev = data["previousPrice"] ?? data["oldPrice"],
+               let curr = data["currentPrice"] ?? data["newPrice"] ?? data["price"],
+               let prevNum = Double("\(prev)"), let currNum = Double("\(curr)") {
+                return currNum < prevNum ? "price_drop" : "price_increase"
+            }
+            return "price_drop"
+        case "apartment_search":
+            return "new_listing"
+        case "betting_odds":
+            return "line_movement"
+        default:
+            return "price_drop"
+        }
+    }
+
+    private static func buildAlertMessage(skillName: String, data: [String: Any], fallback: String) -> String {
+        switch skillName {
+        case "price_monitor", "flight_search":
+            if let price = data["currentPrice"] ?? data["newPrice"] ?? data["price"],
+               let airline = data["airline"] {
+                return "Price dropped to $\(price) on \(airline)"
+            }
+            if let price = data["currentPrice"] ?? data["newPrice"] ?? data["price"] {
+                return "Price changed to $\(price)"
+            }
+        case "apartment_search":
+            if let address = data["address"], let rent = data["rent"] {
+                return "New listing at \(address) for $\(rent)/mo"
+            }
+        case "betting_odds":
+            if let oldSpread = data["oldSpread"], let newSpread = data["newSpread"],
+               let team = data["team"] {
+                return "\(team) spread moved from \(oldSpread) to \(newSpread)"
+            }
+        default:
+            break
+        }
+        // Fallback: use first meaningful value from data or watch description
+        if let firstValue = data.first(where: { $0.key != "timestamp" }) {
+            return "\(firstValue.key): \(firstValue.value)"
+        }
+        return fallback.isEmpty ? "Change detected" : fallback
+    }
+
+    private static func inferCardType(skillName: String) -> String? {
+        switch skillName {
+        case "price_monitor", "flight_search": return "flight"
+        case "apartment_search": return "house"
+        case "betting_odds": return "pick"
+        default: return nil
+        }
+    }
+
+    private static func extractValue(from data: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let value = data[key] {
+                return "\(value)"
+            }
+        }
+        return nil
     }
 
     // MARK: - Mock data

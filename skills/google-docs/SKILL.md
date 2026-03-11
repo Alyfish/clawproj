@@ -15,6 +15,37 @@ tags: [documents, google, workspace, docs, sheets, forms, slides, writing]
 
 # Google Docs
 
+## Search Strategy (v2.1 — bash-first)
+
+When the user needs reference material or templates before creating a document, search via SearXNG first:
+
+### Step 1: Search for templates/references (bash, ~2 seconds)
+```bash
+curl -s "http://searxng:8080/search?q=google+docs+template+project+proposal&format=json" \
+  | jq '.results[:10] | .[] | {title, url, snippet}' \
+  > /workspace/data/doc-search.json
+```
+
+### Step 2: Summarize results
+```bash
+jq -r '.[] | "\(.title) — \(.url)"' /workspace/data/doc-search.json
+```
+
+### Step 3: Deep dive (browser, ONLY if needed)
+Only open the browser to:
+- Preview a specific template the user wants to use
+- Copy content structure from an existing public document
+- Access Google Workspace if API calls fail
+
+For document CREATION, use the Google REST APIs directly (see API sections below).
+
+### Step 4: Create & present
+- Create documents via Google Docs/Sheets/Forms/Slides API
+- Present as DocCards via create_card
+- Save document URLs to memory for future reference
+
+> **Execution preference:** Use bash_execute with curl/jq over web_search/http_request for composable, single-call execution.
+
 ## Context
 
 This skill enables ClawBot to create, populate, format, and share Google
@@ -490,3 +521,9 @@ Want me to share it with Alice and Bob?"
 9. **Disclose mock data.** Never present mock documents as real. Show demo notice and `[DEMO]` prefix.
 
 10. **Match complexity to intent.** Quick note = simple doc. Quarterly report = full headings and sections.
+
+## Output Format
+
+When your bash command finds results, end output with CARDS_JSON: followed by a JSON array. Cards auto-render on the user's phone — no need to call create_card separately.
+
+CARDS_JSON:[{"type":"doc","title":"Q3 Strategy Doc","metadata":{"docType":"document","url":"https://docs.google.com/...","mimeType":"application/vnd.google-apps.document"},"actions":["Open","Share"]}]

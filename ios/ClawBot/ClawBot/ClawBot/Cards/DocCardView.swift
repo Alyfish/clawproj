@@ -45,6 +45,13 @@ struct DocCardView: View {
                     .font(.title3)
                     .foregroundStyle(.blue)
             }
+
+            // Share button
+            ShareLink(item: card.url) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding()
         .background(Color(.systemBackground))

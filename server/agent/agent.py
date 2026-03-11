@@ -25,6 +25,7 @@ import anthropic
 import httpx
 
 from server.agent.config import AgentConfig
+from server.agent.session_context import SessionContext
 from server.agent.context_builder import ContextBuilder
 from server.agent.helpers import describe_tool_call, generate_run_id, summarize_result
 from server.agent.skill_registry import (
@@ -202,6 +203,99 @@ def _format_tool_result_content(result: ToolResult) -> str:
     return truncate(text, MAX_TOOL_RESULT_CHARS)
 
 
+# ── Card Action Translation ──────────────────────────────────
+
+_CARD_ACTION_ACK: dict[str, str] = {
+    "watch_price": "Setting up price monitoring...",
+    "watch_line": "Setting up line monitoring...",
+    "book": "Starting booking process...",
+    "place_bet": "Starting bet placement...",
+    "schedule_tour": "Working on tour scheduling...",
+    "save": "Saving to your preferences...",
+}
+
+
+def _card_action_to_message(action: str, card_type: str, card_data: dict) -> str:
+    """Translate a card action tap into a natural language instruction for Claude.
+
+    The key insight: we don't build separate code paths for each card action.
+    Instead, we translate the button tap into a message that flows through
+    the normal agent loop.  Claude already knows how to write monitoring
+    scripts, request approval for payments, use the browser for booking,
+    and save to memory — we just tell it WHAT the user wants.
+    """
+    if action == "watch_price" and card_type == "flight":
+        airline = card_data.get("airline", "")
+        route = card_data.get("route", "")
+        price = card_data.get("price", "")
+        return (
+            f"The user tapped 'Watch Price' on a flight card. "
+            f"Set up a price monitor for {airline} {route}, currently ${price}. "
+            f"Write a monitoring script and schedule it to run every 2 hours. "
+            f"Alert the user if the price drops by more than $20."
+        )
+
+    elif action == "watch_price" and card_type == "house":
+        address = card_data.get("address", "")
+        rent = card_data.get("rent", "")
+        return (
+            f"The user tapped 'Watch Price' on a house listing. "
+            f"Set up a monitor for {address}, currently ${rent}/month. "
+            f"Check daily for price changes or if the listing is removed."
+        )
+
+    elif action == "watch_line" and card_type == "pick":
+        matchup = card_data.get("matchup", "")
+        line = card_data.get("line", "")
+        return (
+            f"The user tapped 'Watch Line' on a betting card. "
+            f"Set up a line movement monitor for {matchup}, current line: {line}. "
+            f"Check every hour and alert on movement > 1 point."
+        )
+
+    elif action == "book" and card_type == "flight":
+        airline = card_data.get("airline", "")
+        route = card_data.get("route", "")
+        price = card_data.get("price", "")
+        url = card_data.get("url", "")
+        return (
+            f"The user tapped 'Book This' on a flight card. "
+            f"They want to book {airline} {route} for ${price}. "
+            f"Navigate to {url} in the browser and begin the booking process. "
+            f"Request approval before completing any payment."
+        )
+
+    elif action == "place_bet" and card_type == "pick":
+        matchup = card_data.get("matchup", "")
+        line = card_data.get("line", "")
+        return (
+            f"The user tapped 'Place Bet' on a pick card. "
+            f"They want to bet on {matchup} at {line}. "
+            f"Navigate to the sportsbook and begin placing the bet. "
+            f"Request approval before confirming the wager."
+        )
+
+    elif action == "schedule_tour" and card_type == "house":
+        address = card_data.get("address", "")
+        return (
+            f"The user tapped 'Schedule Tour' for the listing at {address}. "
+            f"Draft a tour request message. Request approval before sending."
+        )
+
+    elif action == "save":
+        return (
+            f"The user tapped 'Save' on a {card_type} card. "
+            f"Save this to memory: {json.dumps(card_data, indent=2)}"
+        )
+
+    else:
+        return (
+            f"The user tapped '{action}' on a {card_type} card. "
+            f"Card data: {json.dumps(card_data)}\n"
+            f"Take the appropriate action."
+        )
+
+
 # ── Agent ─────────────────────────────────────────────────────
 
 class Agent:
@@ -236,6 +330,7 @@ class Agent:
         self._histories: dict[str, list[dict[str, Any]]] = {}
         self._active_runs: dict[str, bool] = {}
         self._task_emitted: dict[str, bool] = {}
+        self._session_contexts: dict[str, SessionContext] = {}
         self._current_user_message: str = ""
 
     # ── Tool definitions for Claude API ───────────────────────
@@ -290,6 +385,13 @@ class Agent:
             if message.get("schedule_trigger"):
                 await self._handle_schedule_trigger(
                     message["schedule_trigger"], session_id,
+                )
+                continue
+
+            # Intercept card action events (from iOS via gateway)
+            if message.get("card_action"):
+                await self._handle_card_action(
+                    message["card_action"], session_id,
                 )
                 continue
 
@@ -352,7 +454,9 @@ class Agent:
             parts.append(json.dumps(previous.get("data", {}), indent=2))
             parts.append("Compare current data to this and note any changes.")
         parts.append(
-            "\nExecute the check and provide a structured summary of findings."
+            "\nExecute the check. If the monitoring script outputs STATUS: CHANGED, "
+            "call emit_alert with the details. If STATUS: NO_CHANGE or FIRST_RUN, "
+            "do nothing — don't message the user."
         )
 
         synthetic_msg = "\n".join(parts)
@@ -376,6 +480,37 @@ class Agent:
                 "summary": f"Error: {e}",
             })
 
+    # ── Card action dispatch ────────────────────────────────
+
+    async def _handle_card_action(
+        self, action_payload: dict, session_id: str,
+    ) -> None:
+        """Handle a card action tap from iOS (e.g., Watch Price, Book, Place Bet).
+
+        Translates the structured action into a natural language message
+        and feeds it through the normal agent loop.
+        """
+        action = action_payload.get("action", "")
+        card_type = action_payload.get("cardType", "")
+        card_data = action_payload.get("cardData", {})
+
+        # Send quick acknowledgment to the user
+        ack = _CARD_ACTION_ACK.get(action, f"Processing '{action}'...")
+        await self.gateway.stream_text(ack + "\n", session_id)
+
+        # Translate to natural language for Claude
+        synthetic_msg = _card_action_to_message(action, card_type, card_data)
+        logger.info("Card action: %s on %s card", action, card_type)
+
+        try:
+            await self.process_message(synthetic_msg, session_id)
+        except Exception as e:
+            logger.error("Card action %s failed: %s", action, e)
+            await self.gateway.stream_text(
+                f"\nFailed to process card action: {e}",
+                session_id,
+            )
+
     # ── THE CORE: process_message ─────────────────────────────
 
     async def process_message(self, user_message: str, session_id: str) -> None:
@@ -391,6 +526,11 @@ class Agent:
         self._active_runs[run_id] = True
 
         self._current_user_message = user_message
+
+        # Initialize session context for data verification tracking
+        if session_id not in self._session_contexts:
+            self._session_contexts[session_id] = SessionContext()
+        session_ctx = self._session_contexts[session_id]
 
         try:
             # 1. Signal start
@@ -435,8 +575,13 @@ class Agent:
                 # Append assistant response to messages
                 assistant_content = []
                 for block in final_message.content:
-                    if hasattr(block, "model_dump"):
-                        assistant_content.append(block.model_dump())
+                    if block.type == "tool_use":
+                        assistant_content.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        })
                     elif hasattr(block, "text"):
                         assistant_content.append({"type": "text", "text": block.text})
                     else:
@@ -742,12 +887,65 @@ class Agent:
                 })
                 continue
 
+            # === Pre-execution verification checks ===
+            session_ctx = self._session_contexts.get(session_id)
+            if session_ctx:
+                # Soft check: card without verified data
+                if tool_name == "create_card":
+                    warning = session_ctx.check_card_data(
+                        tool_input.get("type", ""), tool_input
+                    )
+                    if warning:
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": warning,
+                            "is_error": True,
+                        })
+                        await self.gateway.stream_thinking(
+                            tool_name, description, "error", session_id,
+                        )
+                        continue
+
+                # Hard check: payment without verified data
+                if tool_name == "request_approval":
+                    action = tool_input.get("action", "")
+                    if "pay" in action.lower():
+                        rejection = session_ctx.check_payment_readiness()
+                        if rejection:
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": rejection,
+                                "is_error": True,
+                            })
+                            await self.gateway.stream_thinking(
+                                tool_name, description, "error", session_id,
+                            )
+                            continue
+
             # === Regular tool execution ===
             await self.gateway.emit_tool_start(tool_name, description, session_id)
 
             result = await self.tool_registry.execute(
                 tool_name, block.id, tool_input,
             )
+
+            # Auto-emit cards from bash_execute output (CARDS_JSON: convention)
+            if tool_name == "bash_execute" and result.success:
+                result = await self._auto_emit_cards(result, task_id, session_id)
+
+            # Record tool call in session context
+            if session_ctx:
+                command = tool_input.get("command", "") if tool_name == "bash_execute" else ""
+                session_ctx.record_tool_call(tool_name, command)
+                # Track file writes to /workspace/data/
+                if tool_name == "bash_execute" and result.success:
+                    cmd = tool_input.get("command", "")
+                    if "/workspace/data/" in cmd and any(op in cmd for op in [">", "tee ", "cp ", "mv "]):
+                        for part in cmd.split():
+                            if part.startswith("/workspace/data/"):
+                                session_ctx.record_file_write(part)
 
             content = _format_tool_result_content(result)
             summary = summarize_result(result)
@@ -798,6 +996,67 @@ class Agent:
             })
 
         return tool_results
+
+    # ── Auto-emit cards from bash output ─────────────────────
+
+    async def _auto_emit_cards(
+        self, result: ToolResult, task_id: str | None, session_id: str,
+    ) -> ToolResult:
+        """Extract CARDS_JSON marker from bash stdout and auto-emit cards.
+
+        Scripts can print a CARDS_JSON: marker followed by a JSON array of
+        card objects as their last line. This method detects the marker,
+        emits each card via the gateway, and strips the marker from stdout
+        so Claude never sees it.
+        """
+        if not isinstance(result.output, dict):
+            return result
+        stdout = result.output.get("stdout", "")
+        if not stdout:
+            return result
+
+        # Only scan last 20KB to avoid scanning huge outputs
+        tail = stdout[-20_480:]
+        marker_pos = tail.rfind("CARDS_JSON:")
+        if marker_pos == -1:
+            return result
+
+        # Map back to position in full stdout
+        offset = len(stdout) - len(tail)
+        abs_pos = offset + marker_pos
+
+        json_str = stdout[abs_pos + len("CARDS_JSON:"):].strip()
+        try:
+            cards = json.loads(json_str)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("CARDS_JSON marker found but JSON is malformed")
+            return result
+
+        if not isinstance(cards, list):
+            logger.warning("CARDS_JSON payload is not a list, skipping")
+            return result
+
+        now = datetime.now(timezone.utc).isoformat()
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            # Stamp defaults matching create_card.py
+            card.setdefault("id", uuid.uuid4().hex[:12])
+            card.setdefault("source", "agent")
+            card.setdefault("createdAt", now)
+            try:
+                await self.gateway.emit_card(card)
+                if task_id:
+                    await self.gateway.emit_task_update(
+                        task_id, "executing", card=card,
+                    )
+            except Exception:
+                logger.warning("Failed to emit auto-card", exc_info=True)
+
+        # Strip CARDS_JSON line from stdout
+        stripped = stdout[:abs_pos].rstrip("\n")
+        result.output = {**result.output, "stdout": stripped}
+        return result
 
     # ── History management ────────────────────────────────────
 

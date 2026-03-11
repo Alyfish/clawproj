@@ -1,14 +1,45 @@
 ---
 name: price-monitor
 description: Monitor prices, listings, or odds for changes. Set up alerts for price drops, new listings, or line movements.
-tools: [http_request, save_memory, search_memory, create_card]
+tools: [bash_execute, save_memory, search_memory, create_card, schedule]
 approval_actions: []
-version: "1.0.0"
+version: "2.0.0"
 author: ClawBot
 tags: [monitoring, alerts, watchlist, price-tracking]
 ---
 
 # Price Monitor
+
+## Search Strategy (v2.1 — bash-first)
+
+When checking a watched item, ALWAYS search via SearXNG first:
+
+### Step 1: Search current price (bash, ~2 seconds)
+```bash
+curl -s "http://searxng:8080/search?q=current+price+Delta+NYC+LAX+flight&format=json" \
+  | jq '.results[:5] | .[] | {title, url, snippet}' \
+  > /workspace/data/price-check.json
+```
+
+### Step 2: Extract price from results
+```bash
+jq -r '.[] | .snippet' /workspace/data/price-check.json | grep -oP '\$[\d,]+(\.\d{2})?'
+```
+
+### Step 3: Deep dive (browser, ONLY if needed)
+Only open the browser to:
+- Verify an exact price on the source page
+- Check if a listing has been removed or updated
+- Confirm availability before alerting the user
+
+DO NOT navigate to source sites and browse manually for price checks. SearXNG gives you the data faster.
+
+### Step 4: Compare & alert
+- Compare new price to saved baseline in memory
+- If threshold met (e.g., price drop > $20), alert the user
+- Update the saved price in memory for the next check
+
+> **Execution preference:** Use bash_execute with curl/jq over web_search/http_request for composable, single-call execution.
 
 ## Context
 
@@ -216,33 +247,46 @@ Parse results to find all entries with `"active-watch"` tag.
 
 ### Step 2: Process Each Watch
 
-For each active watch:
+For each active watch, use bash-first (curl/jq) for data fetching and structured tools (create_card, save_memory) for outputs that iOS needs.
 
 **price_watch:**
-1. Extract search params from the watch content
-2. Load the appropriate skill (flight-search or apartment-search)
-3. Re-run the search with the saved params using `http_request`
-4. Compare best current price to `baseline_price`
-5. If price dropped by more than threshold → trigger alert
-6. If price increased significantly (>20%) → inform user (not an alert, just a note)
-7. Append new price to the Price History section
-8. Update `last_checked` timestamp
+1. **Search (bash):**
+   ```
+   bash_execute: curl -s 'http://searxng:8080/search?q={item}+price+buy&format=json' | jq '.results[:5]' > /workspace/data/price-search-{watch_id}.json
+   ```
+2. **Extract prices (bash):**
+   For each URL from search results:
+   ```
+   bash_execute: curl -sL "{url}" | grep -oP '\$[\d,]+\.?\d{0,2}' | head -5
+   ```
+   If curl returns nothing useful → fall back to browser tool for that URL.
+3. **Compare and alert (structured tool):**
+   Compare extracted prices to `baseline_price` from watch config.
+   If threshold exceeded → `create_card` with price drop data (MUST use create_card — iOS needs typed data).
+4. **Update memory:**
+   `save_memory` with updated price history and `last_checked`.
 
 **new_listing:**
-1. Extract search params from the watch content
-2. Re-run apartment search with saved params
-3. Compare returned listing IDs to `known_listing_ids`
-4. New IDs = new listings → trigger alert for each
-5. Add new IDs to the known set
-6. Update `last_checked` timestamp
+1. **Search (bash):**
+   ```
+   bash_execute: curl -s 'http://searxng:8080/search?q={city}+{beds}BR+apartment+rent&format=json' | jq '.results[:10]' > /workspace/data/listing-search-{watch_id}.json
+   ```
+2. **Extract listings (bash):**
+   ```
+   bash_execute: jq -r '.[].url' /workspace/data/listing-search-{watch_id}.json | while read url; do curl -sL "$url" | grep -i 'listing\|available\|bedroom' | head -3; done
+   ```
+3. Compare IDs to known set, alert on new ones via `create_card`.
+4. Update `last_checked` via `save_memory`.
 
 **line_movement:**
-1. Extract event info from the watch content
-2. Re-fetch current odds for the event
-3. Compare current spread/ML/total to baseline
-4. If any movement exceeds threshold → trigger alert
-5. Append new line to Line History
-6. Update `last_checked` timestamp
+1. **Fetch odds (bash):**
+   ```
+   bash_execute: curl -s 'http://searxng:8080/search?q={team1}+vs+{team2}+odds+spread&format=json' | jq '.results[:5]' > /workspace/data/odds-{watch_id}.json
+   ```
+2. **Extract lines (bash):**
+   For each URL: `curl -sL` and grep for spread/odds patterns.
+3. Compare to baseline, alert via `create_card` if threshold exceeded.
+4. Update line history via `save_memory`.
 
 ### Step 3: Update Memory
 
@@ -272,6 +316,24 @@ Checked 3 watches. 1 alert triggered.
 ✅ Austin 2BR: No new listings since last check (3 known)
 ✅ Lakers vs Celtics: Line unchanged at Celtics -5.5
 ```
+
+### Step 5: Monitor Script (bash + structured)
+
+For recurring watches, generate a self-contained monitoring script:
+
+```
+bash_execute: cat > /workspace/scripts/monitor-{watch_id}.sh << 'EOF'
+#!/bin/bash
+# Auto-generated by price-monitor skill
+SEARCH_URL="http://searxng:8080/search?q={query}&format=json"
+OUTPUT="/workspace/data/monitor-{watch_id}-latest.json"
+curl -s "$SEARCH_URL" | jq '.results[:5]' > "$OUTPUT"
+# Extract and compare prices/listings/odds...
+EOF
+chmod +x /workspace/scripts/monitor-{watch_id}.sh
+```
+
+Register with the `schedule` tool for cron execution. The script handles data fetching; the agent interprets results and creates alerts via structured tools on the next scheduled run.
 
 ---
 
@@ -569,3 +631,9 @@ When deactivating a watch, also cancel the corresponding schedule entry.
 8. **Don't spam alerts** — if the same threshold was already triggered and the user hasn't acknowledged it, don't re-alert on the next check (note it as "still below threshold" instead)
 9. **Cross-reference** — when other skills run, check for related watches and mention relevant updates
 10. **Respect deactivation** — when a watch is deactivated, never re-activate it automatically
+
+## Output Format
+
+When your bash command finds results, end output with CARDS_JSON: followed by a JSON array. Cards auto-render on the user's phone — no need to call create_card separately.
+
+CARDS_JSON:[{"type":"generic","title":"Jordan 11 — $75","metadata":{"source":"Foot Locker","price":"$75","url":"https://footlocker.com"},"actions":["Watch Price","Open","Share"]}]

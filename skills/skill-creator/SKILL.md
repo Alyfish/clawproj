@@ -14,6 +14,8 @@ tags: [meta, skill-creation, self-extending, automation]
 
 # Skill Creator
 
+> **Execution preference:** Use bash_execute with curl/jq over web_search/http_request for composable, single-call execution.
+
 ## Context
 
 You are ClawBot's meta-skill — the skill that creates other skills. When no existing

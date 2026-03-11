@@ -2,7 +2,9 @@ import SwiftUI
 
 struct HouseCardView: View {
     let card: HouseCard
+    var onAction: CardActionHandler? = nil
     @State private var showDocs = false
+    @State private var loadingAction: String?
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -118,11 +120,39 @@ struct HouseCardView: View {
                 .foregroundStyle(.blue)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             }
+
+            // MARK: - Card Actions
+            if onAction != nil {
+                HStack(spacing: 8) {
+                    CardActionButton(label: "Schedule Tour", icon: "calendar.badge.plus", style: .primary,
+                                     isLoading: loadingAction == "schedule_tour") {
+                        fireAction("schedule_tour")
+                    }
+                    CardActionButton(label: "Save", icon: "bookmark", style: .secondary,
+                                     isLoading: loadingAction == "save") {
+                        fireAction("save")
+                    }
+                }
+
+                CardActionButton(label: "Watch Price", icon: "bell", style: .secondary,
+                                 isLoading: loadingAction == "watch_price") {
+                    fireAction("watch_price")
+                }
+            }
         }
         .padding()
         .background(Color(.systemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 2)
+    }
+
+    private func fireAction(_ action: String) {
+        loadingAction = action
+        onAction?(action)
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            loadingAction = nil
+        }
     }
 
     private var commuteIcon: String {

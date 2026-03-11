@@ -2,13 +2,16 @@ import SwiftUI
 
 struct WatchlistView: View {
     let items: [WatchlistItem]
-    let alerts: [MonitoringAlert]
+    let alerts: [WatchlistAlert]
     var onToggleActive: (WatchlistItem, Bool) -> Void = { _, _ in }
     var onSelectItem: (WatchlistItem) -> Void = { _ in }
+    var onMarkAsRead: ((String) -> Void)?
+    var onMarkAllAsRead: (() -> Void)?
+    var onAlertTap: ((WatchlistAlert) -> Void)?
 
     var body: some View {
         Group {
-            if items.isEmpty {
+            if items.isEmpty && alerts.isEmpty {
                 emptyState
             } else {
                 watchList
@@ -16,38 +19,64 @@ struct WatchlistView: View {
         }
         .navigationTitle("Watchlists")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if unreadCount > 0 {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Mark All Read") {
+                        onMarkAllAsRead?()
+                    }
+                    .font(.caption)
+                }
+            }
+        }
     }
 
     private var watchList: some View {
         List {
-            // New alerts section
-            if !unresolvedAlerts.isEmpty {
-                Section("Recent Alerts") {
-                    ForEach(unresolvedAlerts.prefix(3)) { alert in
-                        AlertCardView(alert: alert)
-                            .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+            // Alerts section
+            if !sortedAlerts.isEmpty {
+                Section(alertsSectionHeader) {
+                    ForEach(sortedAlerts) { alert in
+                        WatchlistAlertRow(alert: alert) {
+                            onMarkAsRead?(alert.id)
+                            onAlertTap?(alert)
+                        }
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                     }
                 }
             }
 
             // Watch items
-            Section("Active Watches") {
-                ForEach(items) { item in
-                    WatchlistRowView(
-                        item: item,
-                        alertCount: alerts.filter { $0.watchlistItemId == item.id }.count,
-                        onToggle: { active in onToggleActive(item, active) },
-                        onTap: { onSelectItem(item) }
-                    )
+            if !items.isEmpty {
+                Section("Active Watches") {
+                    ForEach(items) { item in
+                        WatchlistRowView(
+                            item: item,
+                            alertCount: alerts.filter { $0.watchId == item.id }.count,
+                            onToggle: { active in onToggleActive(item, active) },
+                            onTap: { onSelectItem(item) }
+                        )
+                    }
                 }
             }
         }
         .listStyle(.insetGrouped)
     }
 
-    private var unresolvedAlerts: [MonitoringAlert] {
+    private var sortedAlerts: [WatchlistAlert] {
         alerts.sorted { $0.timestamp > $1.timestamp }
+    }
+
+    private var unreadCount: Int {
+        alerts.filter { !$0.isRead }.count
+    }
+
+    private var alertsSectionHeader: String {
+        if unreadCount > 0 {
+            return "Recent Alerts (\(unreadCount) unread)"
+        }
+        return "Recent Alerts"
     }
 
     private var emptyState: some View {

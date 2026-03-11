@@ -103,6 +103,28 @@ export interface LoginFlowEndEvent {
   };
 }
 
+// ── Watchlist alert events (agent → gateway → iOS + push) ───
+
+export interface WatchlistAlertPayload {
+  watchId: string;
+  alertType: string;
+  title: string;
+  message: string;
+  item: string;
+  source: string;
+  previousValue: string;
+  currentValue: string;
+  threshold: string;
+  url?: string;
+  cardType?: string;
+  timestamp: string;
+}
+
+export interface WatchlistAlertEvent {
+  event: 'watchlist/alert';
+  payload: WatchlistAlertPayload;
+}
+
 // ── Scheduler events (cron/watch system) ────────────────────
 
 export interface ScheduleTaskTriggerEvent {
@@ -168,7 +190,8 @@ export type StreamEvent =
   | LoginFlowEndEvent
   | ScheduleTaskTriggerEvent
   | ScheduleTaskResultEvent
-  | ScheduleWatchUpdateEvent;
+  | ScheduleWatchUpdateEvent
+  | WatchlistAlertEvent;
 
 // ── Client request payloads (client → server) ──────────────
 
@@ -200,4 +223,10 @@ export interface LoginClickPayload {
 
 export interface LoginDonePayload {
   profile: string;
+}
+
+export interface CardActionPayload {
+  action: string;
+  cardType: string;
+  cardData: Record<string, unknown>;
 }

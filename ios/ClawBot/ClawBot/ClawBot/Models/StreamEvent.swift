@@ -36,6 +36,8 @@ enum StreamEvent {
     case loginFlowEnd(profile: String, authenticated: Bool, domain: String)
     /// Scheduled watch updated (created, removed, alert triggered).
     case watchUpdate(action: String, watch: [String: AnyCodable]?, alert: [String: AnyCodable]?)
+    /// Flat watchlist alert emitted by the agent's emit_alert tool.
+    case watchlistAlert(alert: WatchlistAlert)
     /// Unrecognised event name — forward-compatible.
     case unknown(event: String, payload: [String: AnyCodable]?)
 
@@ -164,6 +166,24 @@ enum StreamEvent {
                 alert = nil
             }
             return .watchUpdate(action: action, watch: watch, alert: alert)
+
+        case "watchlist/alert":
+            guard let pd = p else { return nil }
+            let alert = WatchlistAlert(
+                id: UUID().uuidString,
+                watchId: pd["watchId"]?.stringValue ?? "",
+                alertType: pd["alertType"]?.stringValue ?? "general_change",
+                title: pd["title"]?.stringValue ?? "",
+                message: pd["message"]?.stringValue ?? "",
+                source: pd["source"]?.stringValue ?? "",
+                previousValue: pd["previousValue"]?.stringValue,
+                currentValue: pd["currentValue"]?.stringValue,
+                url: pd["url"]?.stringValue,
+                cardType: pd["cardType"]?.stringValue,
+                timestamp: pd["timestamp"]?.stringValue
+                    ?? ISO8601DateFormatter().string(from: Date())
+            )
+            return .watchlistAlert(alert: alert)
 
         default:
             return .unknown(event: eventName, payload: p)

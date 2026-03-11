@@ -4,6 +4,8 @@ import SwiftUI
 
 struct PickCardView: View {
     let card: PickCard
+    var onAction: CardActionHandler? = nil
+    @State private var loadingAction: String?
 
     // MARK: - Computed Properties
 
@@ -97,11 +99,34 @@ struct PickCardView: View {
                     .foregroundStyle(.tertiary)
                     .italic()
             }
+
+            // MARK: - Actions
+            if onAction != nil {
+                HStack(spacing: 8) {
+                    CardActionButton(label: "Place Bet", icon: "dollarsign.circle", style: .primary,
+                                     isLoading: loadingAction == "place_bet") {
+                        fireAction("place_bet")
+                    }
+                    CardActionButton(label: "Watch Line", icon: "bell", style: .secondary,
+                                     isLoading: loadingAction == "watch_line") {
+                        fireAction("watch_line")
+                    }
+                }
+            }
         }
         .padding()
         .background(Color(.systemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 2)
+    }
+
+    private func fireAction(_ action: String) {
+        loadingAction = action
+        onAction?(action)
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            loadingAction = nil
+        }
     }
 }
 

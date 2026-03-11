@@ -207,10 +207,8 @@ class TestSystemPrompt:
         prompt = builder.build_system_prompt(memory_query="flights")
         # SOUL
         assert "ClawBot" in prompt
-        # Skills
-        assert "flight-search" in prompt
-        assert "apartment-search" in prompt
-        assert "<available_skills>" in prompt
+        # Skills — no longer inline (progressive loading), so no <available_skills>
+        assert "<available_skills>" not in prompt
         # Tools
         assert "http_request" in prompt
         assert "browser" in prompt
@@ -225,13 +223,12 @@ class TestSystemPrompt:
 
     def test_section_order(self, builder):
         prompt = builder.build_system_prompt(memory_query="test")
-        # SOUL should come before skills
+        # SOUL should come before tools
         soul_pos = prompt.find("ClawBot")
-        skills_pos = prompt.find("<available_skills>")
         tools_pos = prompt.find("<available_tools>")
         context_pos = prompt.find("<current_context>")
         memory_pos = prompt.find("<relevant_memory>")
-        assert soul_pos < skills_pos < tools_pos < context_pos < memory_pos
+        assert soul_pos < tools_pos < context_pos < memory_pos
 
     def test_no_memory_without_query(self, builder):
         prompt = builder.build_system_prompt()  # no memory_query
@@ -240,6 +237,7 @@ class TestSystemPrompt:
     def test_no_skills_without_registry(self, minimal_builder):
         prompt = minimal_builder.build_system_prompt()
         assert "<available_skills>" not in prompt
+        assert "<skills_index>" not in prompt
         assert "ClawBot" in prompt  # SOUL still present
 
     def test_no_tools_without_tools(self, minimal_builder):
@@ -378,7 +376,7 @@ class TestCompactHistory:
         ]
         result = builder.compact_history(messages)
         # The summary message should mention old content
-        assert "Previous conversation context" in result[0]["content"]
+        assert "Summary" in result[0]["content"]
 
     def test_compaction_tiny_history(self, soul_file):
         builder = ContextBuilder(
@@ -424,3 +422,145 @@ class TestConfiguration:
         prompt = builder.build_system_prompt()
         assert "new_tool" in prompt
         assert "http_request" not in prompt  # replaced
+
+
+# ============================================================
+# FIXTURE: BUILDER WITH WORKSPACE
+# ============================================================
+
+@pytest.fixture
+def builder_with_workspace(soul_file, tmp_path):
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / "data").mkdir()
+    (ws / "logs").mkdir()
+    (ws / "skills").mkdir()
+    return ContextBuilder(
+        soul_path=str(soul_file),
+        skill_registry=MockSkillRegistry(),
+        memory_system=MockMemorySystem(),
+        tools=MOCK_TOOLS,
+        workspace_path=str(ws),
+    )
+
+
+# ============================================================
+# TESTS: PROGRESSIVE SKILL LOADING
+# ============================================================
+
+class TestProgressiveSkillLoading:
+    def test_skills_not_in_base_prompt(self, builder_with_workspace):
+        prompt = builder_with_workspace.build_system_prompt()
+        assert "<available_skills>" not in prompt
+        assert "flight-search" not in prompt  # full skill content not inlined
+        assert "apartment-search" not in prompt
+
+    def test_skill_reference_in_prompt(self, builder_with_workspace):
+        prompt = builder_with_workspace.build_system_prompt()
+        assert "INDEX.md" in prompt
+        assert "<skills_index>" in prompt
+
+
+# ============================================================
+# TESTS: COMPACTION UPGRADE
+# ============================================================
+
+class TestCompactionUpgrade:
+    def test_compaction_triggers_at_120k(self, soul_file):
+        builder = ContextBuilder(
+            soul_path=str(soul_file),
+            max_tokens=120_000,
+            keep_recent=5,
+        )
+        # Create messages totalling ~130K tokens (~520K chars)
+        messages = [
+            {"role": "user", "content": "x" * 26_000}
+            for _ in range(20)
+        ]
+        result = builder.compact_history(messages)
+        assert len(result) < len(messages)
+
+    def test_compaction_saves_log(self, builder_with_workspace, tmp_path):
+        builder_with_workspace._max_tokens = 50
+        builder_with_workspace._keep_recent = 3
+        messages = [
+            {"role": "user", "content": f"Message {i}" + " pad" * 50}
+            for i in range(10)
+        ]
+        builder_with_workspace.compact_history(messages)
+        logs_dir = tmp_path / "workspace" / "logs"
+        log_files = list(logs_dir.glob("session-*.md"))
+        assert len(log_files) >= 1
+        content = log_files[0].read_text()
+        assert "Conversation Log" in content
+
+    def test_compaction_keeps_recent(self, soul_file):
+        builder = ContextBuilder(
+            soul_path=str(soul_file),
+            max_tokens=10,
+            keep_recent=15,
+        )
+        messages = [
+            {"role": "user", "content": f"Message {i}" + " x" * 100}
+            for i in range(30)
+        ]
+        result = builder.compact_history(messages)
+        # Last message should be preserved
+        assert "Message 29" in result[-1]["content"]
+
+    def test_compaction_has_summary(self, builder_with_workspace):
+        builder_with_workspace._max_tokens = 50
+        builder_with_workspace._keep_recent = 3
+        messages = [
+            {"role": "user", "content": f"Message {i}" + " pad" * 50}
+            for i in range(10)
+        ]
+        result = builder_with_workspace.compact_history(messages)
+        assert "Summary" in result[0]["content"]
+
+
+# ============================================================
+# TESTS: TOOL RESULT OFFLOADING
+# ============================================================
+
+class TestToolResultOffloading:
+    def test_large_tool_result_offloaded(self, builder_with_workspace, tmp_path):
+        big_result = "x" * 10_000
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "test-123",
+                        "content": big_result,
+                    }
+                ],
+            }
+        ]
+        builder_with_workspace._offload_large_tool_results(messages)
+        part = messages[0]["content"][0]
+        assert "Output saved to" in part["content"]
+        assert "10000 chars" in part["content"]
+        # File should exist
+        data_dir = tmp_path / "workspace" / "data"
+        files = list(data_dir.glob("tool-result-*.json"))
+        assert len(files) == 1
+        assert files[0].read_text() == big_result
+
+    def test_small_tool_result_kept(self, builder_with_workspace):
+        small_result = "small output"
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "test-456",
+                        "content": small_result,
+                    }
+                ],
+            }
+        ]
+        builder_with_workspace._offload_large_tool_results(messages)
+        assert messages[0]["content"][0]["content"] == small_result

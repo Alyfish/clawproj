@@ -75,6 +75,18 @@ export interface DeviceTokenRow {
   last_used: string;
 }
 
+export interface WatchlistAlertRow {
+  id: string;
+  watch_id: string;
+  alert_type: string;
+  title: string;
+  message: string;
+  payload: string;
+  session_id: string;
+  created_at: string;
+  read: number;
+}
+
 // ── GatewayDB ─────────────────────────────────────────────────────
 
 export class GatewayDB {
@@ -185,6 +197,21 @@ export class GatewayDB {
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_device_tokens_session ON device_tokens(session_id);
+
+      CREATE TABLE IF NOT EXISTS watchlist_alerts (
+        id TEXT PRIMARY KEY,
+        watch_id TEXT NOT NULL,
+        alert_type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        read INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_watchlist_alerts_session ON watchlist_alerts(session_id);
+      CREATE INDEX IF NOT EXISTS idx_watchlist_alerts_read ON watchlist_alerts(session_id, read);
     `);
   }
 
@@ -577,6 +604,58 @@ export class GatewayDB {
       .prepare(`DELETE FROM device_tokens WHERE last_used < ?`)
       .run(before);
     return result.changes;
+  }
+
+  // ── Watchlist Alerts ─────────────────────────────────────────
+
+  insertWatchlistAlert(
+    id: string,
+    watchId: string,
+    alertType: string,
+    title: string,
+    message: string,
+    payload: string,
+    sessionId: string,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO watchlist_alerts (id, watch_id, alert_type, title, message, payload, session_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        watchId,
+        alertType,
+        title,
+        message,
+        payload,
+        sessionId,
+        new Date().toISOString(),
+      );
+  }
+
+  getUnreadAlerts(sessionId: string, limit: number = 50): WatchlistAlertRow[] {
+    return this.db
+      .prepare(
+        `SELECT id, watch_id, alert_type, title, message, payload, session_id, created_at, read
+       FROM watchlist_alerts WHERE session_id = ? AND read = 0
+       ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(sessionId, limit) as WatchlistAlertRow[];
+  }
+
+  markAlertRead(id: string): void {
+    this.db
+      .prepare(`UPDATE watchlist_alerts SET read = 1 WHERE id = ?`)
+      .run(id);
+  }
+
+  markAllAlertsRead(sessionId: string): void {
+    this.db
+      .prepare(
+        `UPDATE watchlist_alerts SET read = 1 WHERE session_id = ? AND read = 0`,
+      )
+      .run(sessionId);
   }
 
   // ── Lifecycle ───────────────────────────────────────────────
