@@ -38,7 +38,7 @@ class AgentConfig:
     api_key: str = ""  # loaded from ANTHROPIC_API_KEY
 
     # --- Agent behavior ---
-    max_iterations: int = 25          # safety limit per turn (like Ralph's max_iterations)
+    max_iterations: int = 10          # hard stop per turn (SOUL.md: read-only 3, action 5, complex 8, hard 10)
     max_tool_retries: int = 2         # retry a failed tool call this many times
     stream_responses: bool = True     # stream text deltas to user in real-time
 

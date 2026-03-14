@@ -699,7 +699,7 @@ class TestProfileSwitching:
         """CDPBrowserTool() with no profile_manager, profile param ignored."""
         tool = CDPBrowserTool()
         assert tool._profile_manager is None
-        assert tool._active_profile is None
+        assert tool._active_profile == "default"
 
     def test_cdp_url_includes_user_data_dir(self, tool_with_profiles, profile_manager):
         """_build_cdp_url() includes --user-data-dir in launch args."""
@@ -713,6 +713,8 @@ class TestProfileSwitching:
     @pytest.mark.asyncio
     async def test_switch_creates_default_profile(self, tool_with_profiles, profile_manager):
         """Switching to 'default' auto-creates the default profile."""
+        # Start from a non-default profile to trigger the switch path
+        tool_with_profiles._active_profile = "other"
         await tool_with_profiles._switch_profile_if_needed("default")
         assert tool_with_profiles._active_profile == "default"
         assert profile_manager.get_profile("default") is not None

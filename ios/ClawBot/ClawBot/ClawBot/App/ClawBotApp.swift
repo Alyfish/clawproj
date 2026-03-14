@@ -5,25 +5,53 @@ import UserNotifications
 struct ClawBotApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var deepLinkHandler = DeepLinkHandler.shared
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environmentObject(deepLinkHandler)
-                .onOpenURL { url in
-                    deepLinkHandler.handle(url: url)
-                }
-                .onAppear {
-                    NotificationManager.shared.setup()
-                    pickupSharedItems()
-                }
-                .onReceive(
-                    NotificationCenter.default.publisher(
-                        for: UIApplication.didBecomeActiveNotification
-                    )
-                ) { _ in
-                    pickupSharedItems()
-                }
+            if hasCompletedOnboarding {
+                mainContent
+            } else {
+                OnboardingFlow(onComplete: { hasCompletedOnboarding = true })
+                    .onContinueUserActivity("com.apple.authentication-services.credential-exchange") { activity in
+                        handleCXPImport(activity: activity)
+                    }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var mainContent: some View {
+        ContentView()
+            .environmentObject(deepLinkHandler)
+            .onOpenURL { url in
+                deepLinkHandler.handle(url: url)
+            }
+            .onAppear {
+                NotificationManager.shared.setup()
+                pickupSharedItems()
+            }
+            .onContinueUserActivity("com.apple.authentication-services.credential-exchange") { activity in
+                handleCXPImport(activity: activity)
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: UIApplication.didBecomeActiveNotification
+                )
+            ) { _ in
+                pickupSharedItems()
+            }
+    }
+
+    private func handleCXPImport(activity: NSUserActivity) {
+        if #available(iOS 26, *) {
+            Task {
+                let handler = CXPImportHandler()
+                let count = await handler.handleImport(activity: activity)
+                #if DEBUG
+                print("[ClawBotApp] CXP imported \(count) credential(s)")
+                #endif
+            }
         }
     }
 

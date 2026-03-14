@@ -175,15 +175,19 @@ JS_DETECT_LOGIN_FORM = """() => {
             (i.type === 'text' || i.type === 'email' || i.type === 'tel') &&
             !i.hidden && i.offsetWidth > 0 && i.offsetHeight > 0
         );
-        // Find a submit-like button
-        const buttons = Array.from(document.querySelectorAll(
-            'button[type="submit"], input[type="submit"], ' +
-            'button:not([type]), [role="button"]'
-        ));
-        const submitBtn = buttons.find(b => {
-            const txt = (b.textContent || b.value || '').toLowerCase();
-            return /sign.?in|log.?in|next|continue|submit/i.test(txt);
-        });
+        // Only search for submit if we actually found form fields
+        let submitBtn = null;
+        if (pwField || textField) {
+            const formEl = (pwField || textField).closest('form');
+            const scope = formEl || document;
+            const buttons = Array.from(scope.querySelectorAll(
+                'button[type="submit"], input[type="submit"], button:not([type])'
+            ));
+            submitBtn = buttons.find(b => {
+                const txt = (b.textContent || b.value || '').toLowerCase();
+                return /sign.?in|log.?in|next|continue|submit/i.test(txt);
+            }) || null;
+        }
         return {
             hasPassword: !!pwField,
             hasUsername: !!textField,
@@ -202,7 +206,7 @@ JS_DETECT_LOGIN_FORM = """() => {
                 submitBtn.id ? '#' + CSS.escape(submitBtn.id) :
                 submitBtn.name ? '[name="' + submitBtn.name + '"]' :
                 submitBtn.type === 'submit' ? '[type="submit"]' :
-                'button'
+                null
             ) : null,
         };
     } catch { return { hasPassword: false, hasUsername: false, hasSubmit: false }; }
@@ -221,7 +225,7 @@ class CDPBrowserTool(BaseTool):
 
     MAX_CONTENT_LENGTH = 50_000
     ACTION_TIMEOUT_MS = 30_000
-    NAVIGATE_TIMEOUT_MS = 60_000
+    NAVIGATE_TIMEOUT_MS = 15_000
     VIEWPORT = {"width": 1280, "height": 720}
     MAX_RETRIES = 3
     BASE_RETRY_DELAY = 1.0
@@ -242,7 +246,7 @@ class CDPBrowserTool(BaseTool):
         self._pages: dict[str, Any] = {}  # session_id -> Page
         self._profile_manager: Any = profile_manager
         self._credential_lookup: Any = credential_lookup  # (url) -> {username, password, name} | None
-        self._active_profile: str | None = None
+        self._active_profile: str | None = "default"
         self._security = BrowserSecurityPolicy()
         self._nav_counts: dict[str, int] = {}  # session_id -> navigation count
         self._current_session_id: str = "default"
@@ -266,6 +270,7 @@ class CDPBrowserTool(BaseTool):
             "authenticate": self._authenticate,
         }
         self._login_flow_manager: Any = None
+        self._login_handler: Any = None
 
     # ── BaseTool interface ────────────────────────────────────────
 
@@ -277,6 +282,10 @@ class CDPBrowserTool(BaseTool):
         """Wire LoginFlowManager after construction (avoids circular init)."""
         self._login_flow_manager = manager
         self._action_dispatch["login"] = self._login
+
+    def set_login_handler(self, handler: Any) -> None:
+        """Wire LoginHandler after construction (avoids circular init)."""
+        self._login_handler = handler
 
     @property
     def description(self) -> str:
@@ -322,8 +331,9 @@ class CDPBrowserTool(BaseTool):
                     "type_ref: {ref, text} — type into element by ref number. "
                     "select_ref: {ref, value} — select option by ref number. "
                     "login: {url} — start interactive login flow (streams to user's phone). "
-                    "authenticate: {url, credential_name?} — auto-fill stored credentials, detect 2FA, "
-                    "falls back to manual login if no credentials or 2FA required."
+                    "authenticate: {domain, reason?} — authenticate using cached sessions, "
+                    "iOS credentials, or interactive login (3-step fallback). "
+                    "Navigate to the login page first, then call authenticate."
                 ),
             },
             "session_id": {
@@ -493,8 +503,13 @@ class CDPBrowserTool(BaseTool):
                     )
                     recovered = await self._recover_stale_browser()
                     if recovered:
-                        # Reset profile so next attempt reconnects cleanly
-                        self._active_profile = None
+                        # Base CDP URL IS the default profile — mark it so
+                        # to prevent _switch_profile_if_needed from
+                        # immediately disconnecting and retriggering the lock
+                        if self._cdp_url == self._base_cdp_url:
+                            self._active_profile = "default"
+                        else:
+                            self._active_profile = None
                         continue
 
                 delay = self.BASE_RETRY_DELAY * (2 ** attempt)
@@ -622,9 +637,23 @@ class CDPBrowserTool(BaseTool):
         if profile == self._active_profile:
             return
 
+        # "default" profile uses base CDP URL — no user-data-dir needed.
+        # If already connected, just adopt "default" identity without
+        # disconnecting (avoids triggering Chrome "already running" lock).
+        if profile == "default" and self._browser is not None:
+            self._active_profile = "default"
+            self._cdp_url = self._base_cdp_url
+            return
+
         # Ensure profile exists
         if profile == "default":
-            self._profile_manager.get_or_create_default()
+            if self._profile_manager:
+                self._profile_manager.get_or_create_default()
+            # Default profile always uses base CDP URL (no --user-data-dir)
+            # to avoid conflicting with Chrome's existing instance
+            self._cdp_url = self._base_cdp_url
+            self._active_profile = "default"
+            return
         else:
             meta = self._profile_manager.get_profile(profile)
             if meta is None:
@@ -774,13 +803,23 @@ class CDPBrowserTool(BaseTool):
         if not dl_check.allowed:
             return {"success": False, "error": f"Blocked: {dl_check.reason}"}
 
-        # Navigate
+        # Navigate — use domcontentloaded + poll for interactive elements.
+        # Avoid networkidle which waits for ALL requests (ads, trackers, etc.)
         try:
-            await page.goto(url, wait_until="networkidle", timeout=self.NAVIGATE_TIMEOUT_MS)
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            # Poll for interactive elements (max 5s, 100ms intervals)
+            for _ in range(50):
+                ready = await page.evaluate(
+                    "document.querySelector('input, button, a, select') !== null"
+                    " && document.readyState !== 'loading'"
+                )
+                if ready:
+                    break
+                await asyncio.sleep(0.1)
         except Exception:
-            # Fallback to domcontentloaded on networkidle timeout
+            # Bare fallback — never use networkidle
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=self.NAVIGATE_TIMEOUT_MS)
+                await page.goto(url, timeout=15000)
             except Exception as e:
                 return {"success": False, "error": f"Navigation failed: {e}"}
 
@@ -823,6 +862,19 @@ class CDPBrowserTool(BaseTool):
             except Exception:
                 pass
 
+        # Login wall detection — hint so agent can auth immediately
+        if self._login_handler:
+            try:
+                is_login_wall = await self._login_handler.detect_login_wall(page)
+                if is_login_wall:
+                    result_data["login_wall_detected"] = True
+                    result_data["hint"] = (
+                        "Login wall detected. Use action='authenticate' "
+                        f"with domain='{urlparse(page.url).hostname}' to sign in."
+                    )
+            except Exception:
+                pass
+
         return result_data
 
     async def _click(self, page: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -841,9 +893,9 @@ class CDPBrowserTool(BaseTool):
             except Exception as e:
                 return {"success": False, "error": f"Click failed: {e}"}
 
-        # Short wait for any navigation/network triggered by the click
+        # Short wait for any navigation triggered by the click
         try:
-            await page.wait_for_load_state("networkidle", timeout=5000)
+            await page.wait_for_load_state("domcontentloaded", timeout=5000)
         except Exception:
             pass
 
@@ -1097,22 +1149,90 @@ class CDPBrowserTool(BaseTool):
     # ── Login flow action ─────────────────────────────────────
 
     async def _login(self, page: Any, params: dict[str, Any]) -> dict[str, Any]:
-        """Start interactive login flow (streams browser to user's phone)."""
-        if self._login_flow_manager is None:
-            return {"success": False, "error": "Login flow manager not configured."}
+        """Start login flow — tries LoginHandler first, then interactive."""
         url = params.get("url", "")
         if not url:
             return {"success": False, "error": "Missing required parameter: url"}
         profile = self._active_profile or "default"
+
+        # Try LoginHandler first (cached session → iOS creds → interactive)
+        if self._login_handler is not None:
+            try:
+                domain = urlparse(url).hostname or ""
+                session_id = self._current_session_id
+                success = await self._login_handler.handle_login_wall(
+                    page, domain, profile=profile, session_id=session_id,
+                )
+                if success:
+                    return {"success": True, "status": "authenticated", "domain": domain}
+            except Exception as e:
+                logger.warning("LoginHandler failed in _login, falling back: %s", e)
+
+        # Fall through to interactive LoginFlowManager
+        if self._login_flow_manager is None:
+            return {"success": False, "error": "Login flow manager not configured."}
         interval_ms = params.get("interval_ms", 1500)
         return await self._login_flow_manager.start_login_flow(
             profile=profile, url=url, interval_ms=interval_ms,
         )
 
-    # ── Authenticate action (auto-fill + 2FA handoff) ─────────
+    # ── Authenticate action (LoginHandler delegation) ─────────
 
     async def _authenticate(self, page: Any, params: dict[str, Any]) -> dict[str, Any]:
-        """Auto-fill login credentials, detect 2FA, fall back to manual if needed.
+        """Authenticate against a domain using the 3-step LoginHandler fallback.
+
+        Delegates to LoginHandler (cached session → iOS creds → interactive).
+        Falls back to legacy auto-fill pipeline if LoginHandler is not wired.
+        """
+        domain = params.get("domain", "")
+        if not domain:
+            return {"success": False, "error": "Missing required parameter: domain"}
+
+        reason = params.get("reason", "")
+        profile = self._active_profile or "default"
+        session_id = self._current_session_id
+
+        if self._login_handler is not None:
+            # Navigate to the domain if not already there
+            current_host = urlparse(page.url).hostname or ""
+            if domain not in current_host:
+                login_url = self._login_handler.get_login_url(domain)
+                nav_result = await self._navigate(page, {"url": login_url})
+                if isinstance(nav_result, dict) and not nav_result.get("success", True):
+                    return nav_result
+                await asyncio.sleep(1)
+
+            try:
+                success = await self._login_handler.handle_login_wall(
+                    page, domain, profile=profile,
+                    session_id=session_id, reason=reason,
+                )
+                if success:
+                    return {
+                        "success": True,
+                        "message": f"Successfully authenticated to {domain}",
+                        "domain": domain,
+                    }
+                return {
+                    "success": False,
+                    "message": f"Check your phone to complete sign-in to {domain}",
+                    "domain": domain,
+                }
+            except Exception as e:
+                logger.warning("LoginHandler error for %s: %s", domain, e)
+                return {
+                    "success": False,
+                    "error": f"Authentication failed for {domain}: {e}",
+                    "domain": domain,
+                }
+
+        # No LoginHandler — fall back to legacy auto-fill pipeline
+        return await self._authenticate_legacy(
+            page, {"url": f"https://{domain}", **params},
+        )
+
+    async def _authenticate_legacy(self, page: Any, params: dict[str, Any]) -> dict[str, Any]:
+        """Legacy auto-fill pipeline: detect form, fill creds, submit.
 
         Flow:
         1. Navigate to URL

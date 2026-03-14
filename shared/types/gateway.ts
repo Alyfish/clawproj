@@ -125,6 +125,52 @@ export interface WatchlistAlertEvent {
   payload: WatchlistAlertPayload;
 }
 
+// ── Credential exchange events (SENSITIVE — never persisted/logged) ──
+
+export interface CredentialRequestEvent {
+  event: 'credential/request';
+  payload: {
+    requestId: string;
+    domain: string;
+    reason: string;
+  };
+}
+
+export interface CredentialResponsePayload {
+  requestId: string;
+  domain: string;
+  credentials: Array<{ username: string; password: string }>;
+}
+
+export interface CredentialNonePayload {
+  requestId: string;
+  domain: string;
+  reason: 'no_credentials' | 'user_denied' | 'not_imported' | 'timeout';
+}
+
+// ── OAuth token lifecycle events (SENSITIVE — never persisted/logged) ──
+
+export interface OAuthTokenDeliverEvent {
+  event: 'credential/token';
+  payload: { service: string; token: string; sessionId: string };
+}
+
+export interface OAuthTokenExpiredEvent {
+  event: 'credential/token:expired';
+  payload: { service: string; sessionId: string };
+}
+
+export interface OAuthTokenRefreshEvent {
+  event: 'credential/token:refresh';
+  payload: { service: string; requestId: string; sessionId: string };
+}
+
+export interface OAuthTokenRefreshedPayload {
+  service: string;
+  token: string;
+  requestId?: string;
+}
+
 // ── Scheduler events (cron/watch system) ────────────────────
 
 export interface ScheduleTaskTriggerEvent {
@@ -191,7 +237,11 @@ export type StreamEvent =
   | ScheduleTaskTriggerEvent
   | ScheduleTaskResultEvent
   | ScheduleWatchUpdateEvent
-  | WatchlistAlertEvent;
+  | WatchlistAlertEvent
+  | CredentialRequestEvent
+  | OAuthTokenDeliverEvent
+  | OAuthTokenExpiredEvent
+  | OAuthTokenRefreshEvent;
 
 // ── Client request payloads (client → server) ──────────────
 

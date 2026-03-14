@@ -31,6 +31,10 @@ from server.agent.tools.login_flow import LoginFlowManager
 from server.agent.tools.schedule import ScheduleTool
 from server.agent.tools.emit_alert import EmitAlertTool
 from server.agent.tools.bash_execute import BashExecuteTool
+from server.agent.tools.session_cache import SessionCache
+from server.agent.tools.credential_manager import CredentialManager
+from server.agent.tools.login_handler import LoginHandler
+from server.agent.tools.bash_credential_helper import BashCredentialHelper
 
 
 def create_registry(
@@ -38,7 +42,7 @@ def create_registry(
     memory_system: Optional[Any] = None,
     credential_store: Optional[Callable[[str], dict | None]] = None,
     site_login_lookup: Optional[Callable[[str], dict | None]] = None,
-) -> tuple[ToolRegistry, LoginFlowManager | None]:
+) -> tuple[ToolRegistry, LoginFlowManager | None, CredentialManager, LoginHandler]:
     """Create a ToolRegistry with all base tools registered.
 
     Args:
@@ -57,7 +61,8 @@ def create_registry(
 
     # ── TIER 1: Primary ─────────────────────────────────────────
     # The agent's default tool. Compose with pipes, scripts, curl.
-    registry.register(BashExecuteTool())
+    bash_tool = BashExecuteTool()
+    registry.register(bash_tool)
 
     # ── TIER 2: Structured ──────────────────────────────────────
     # iOS-facing output and system integration. Use when bash
@@ -90,6 +95,25 @@ def create_registry(
     )
     browser_tool.set_login_flow_manager(login_flow_manager)
 
+    # Session cache + credential manager + login handler
+    session_cache = SessionCache()
+    credential_manager = CredentialManager(gateway_client=gateway_client)
+    login_handler = LoginHandler(
+        browser_tool=browser_tool,
+        credential_manager=credential_manager,
+        session_cache=session_cache,
+        login_flow_manager=login_flow_manager,
+        profile_manager=profile_manager,
+    )
+    browser_tool.set_login_handler(login_handler)
+
+    # Bash credential helper — reuses credential_manager for CLI auth
+    bash_credential_helper = BashCredentialHelper(
+        credential_manager=credential_manager,
+        session_cache=session_cache,
+    )
+    bash_tool.set_bash_credential_helper(bash_credential_helper)
+
     registry.register(VisionTool())
 
     schedule_tool = ScheduleTool(gateway_client=gateway_client)
@@ -107,4 +131,4 @@ def create_registry(
     registry.register(SaveMemoryTool(memory_system=memory_system))
     registry.register(SearchMemoryTool(memory_system=memory_system))
 
-    return registry, login_flow_manager
+    return registry, login_flow_manager, credential_manager, login_handler

@@ -138,6 +138,81 @@ struct FlowLayout: Layout {
     }
 }
 
+// MARK: - CollapsibleStepsBadge
+
+/// Compact badge showing step count. Tapping expands to reveal all step pills.
+/// Auto-expands when errors are detected.
+struct CollapsibleStepsBadge: View {
+    let steps: [ThinkingStep]
+    var currentLabel: String? = nil
+    @State private var isExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Badge — always visible
+            Button {
+                withAnimation(.easeOut(duration: 0.2)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    if isRunning {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+
+                    Text(badgeLabel)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+
+                    if errorCount > 0 {
+                        Text("\(errorCount) error\(errorCount > 1 ? "s" : "")")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
+
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(.systemGray6))
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+
+            // Expanded detail
+            if isExpanded {
+                ThinkingStepsContainer(steps: steps)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .onChange(of: errorCount) {
+            if errorCount > 0 {
+                withAnimation(.easeOut(duration: 0.2)) { isExpanded = true }
+            }
+        }
+    }
+
+    private var isRunning: Bool {
+        steps.contains { $0.status == .running }
+    }
+
+    private var badgeLabel: String {
+        if let label = currentLabel, isRunning {
+            return "\(label) (\(steps.count) steps)"
+        }
+        return "Completed \(steps.count) steps"
+    }
+
+    private var errorCount: Int {
+        steps.filter { $0.status == .error }.count
+    }
+}
+
 // MARK: - Previews
 
 #Preview("Running steps") {
@@ -149,19 +224,34 @@ struct FlowLayout: Layout {
     .padding()
 }
 
-#Preview("Error state") {
-    ThinkingStepsContainer(steps: [
-        ThinkingStep(id: "1", description: "API call failed", status: .error, timestamp: ""),
-    ])
+#Preview("Collapsible badge — running") {
+    CollapsibleStepsBadge(
+        steps: [
+            ThinkingStep(id: "1", description: "Searching flights", status: .done, timestamp: ""),
+            ThinkingStep(id: "2", description: "Parsing results", status: .running, timestamp: ""),
+            ThinkingStep(id: "3", description: "Ranking options", status: .pending, timestamp: ""),
+        ],
+        currentLabel: "Parsing results"
+    )
     .padding()
 }
 
-#Preview("Faded out") {
-    ThinkingStepsContainer(
+#Preview("Collapsible badge — done") {
+    CollapsibleStepsBadge(
         steps: [
-            ThinkingStep(id: "1", description: "Done thinking", status: .done, timestamp: ""),
-        ],
-        isVisible: false
+            ThinkingStep(id: "1", description: "Searched 3 sources", status: .done, timestamp: ""),
+            ThinkingStep(id: "2", description: "Found 12 flights", status: .done, timestamp: ""),
+            ThinkingStep(id: "3", description: "Created 3 cards", status: .done, timestamp: ""),
+        ]
+    )
+    .padding()
+}
+
+#Preview("Collapsible badge — error") {
+    CollapsibleStepsBadge(
+        steps: [
+            ThinkingStep(id: "1", description: "API call failed", status: .error, timestamp: ""),
+        ]
     )
     .padding()
 }

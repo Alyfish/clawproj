@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -59,6 +60,9 @@ class GatewayClient:
         self._device_token: str | None = None
         self._pending_approvals: dict[str, asyncio.Future[dict]] = {}
         self._pending_requests: dict[str, asyncio.Future[dict]] = {}
+        self._pending_credentials: dict[str, asyncio.Future[dict | None]] = {}
+        self._oauth_tokens: dict[str, str] = {}
+        self._pending_token_refreshes: dict[str, asyncio.Future[str | None]] = {}
         self._reconnect_delay: float = config.reconnect_base_delay
         self._shutdown_event: asyncio.Event = asyncio.Event()
         self._message_queue: asyncio.Queue[dict] = asyncio.Queue()
@@ -144,6 +148,18 @@ class GatewayClient:
             if not future.done():
                 future.set_result({"error": "DISCONNECTED"})
         self._pending_requests.clear()
+        # Reject any pending credential requests
+        for req_id, future in list(self._pending_credentials.items()):
+            if not future.done():
+                future.set_result(None)
+        self._pending_credentials.clear()
+        # Reject any pending token refresh requests
+        for service, future in list(self._pending_token_refreshes.items()):
+            if not future.done():
+                future.set_result(None)
+        self._pending_token_refreshes.clear()
+        self._oauth_tokens.clear()
+        os.environ.pop("GOOGLE_WORKSPACE_CLI_TOKEN", None)
         # Drain the message queue
         while not self._message_queue.empty():
             try:
@@ -245,6 +261,39 @@ class GatewayClient:
                                 "approved": False,
                                 "message": "Approval timed out",
                             })
+                    continue
+
+                # ── Credential response (futures) ─────────
+                if msg_type == "event" and event == "credential/response":
+                    request_id = payload.get("requestId")
+                    if request_id and request_id in self._pending_credentials:
+                        future = self._pending_credentials.pop(request_id)
+                        if not future.done():
+                            future.set_result(payload)
+                    continue
+
+                # ── Credential none / timeout (futures) ───
+                if msg_type == "event" and event == "credential/none":
+                    request_id = payload.get("requestId")
+                    if request_id and request_id in self._pending_credentials:
+                        future = self._pending_credentials.pop(request_id)
+                        if not future.done():
+                            future.set_result(None)
+                    continue
+
+                # ── OAuth token delivery (direct env set) ────
+                if msg_type == "event" and event == "credential/token":
+                    service = payload.get("service", "google")
+                    token = payload.get("token")
+                    if token:
+                        self._oauth_tokens[service] = token
+                        os.environ["GOOGLE_WORKSPACE_CLI_TOKEN"] = token
+                        logger.info("OAuth token received for service=%s", service)
+                        # Resolve pending refresh future if any
+                        if service in self._pending_token_refreshes:
+                            future = self._pending_token_refreshes.pop(service)
+                            if not future.done():
+                                future.set_result(token)
                     continue
 
                 # ── Everything else → enqueue for receive_messages() ──
@@ -553,6 +602,81 @@ class GatewayClient:
             self._pending_approvals.pop(approval_id, None)
             return {"approved": False, "message": "Approval timed out"}
 
+    # ── Credential Flow ─────────────────────────────────────────
+
+    async def request_credentials(
+        self,
+        domain: str,
+        reason: str,
+        timeout: float = 30.0,
+    ) -> dict | None:
+        """Request credentials from iOS. BLOCKS until response or timeout.
+
+        Sends a ``credential/request`` event to the gateway which forwards
+        it to all iOS operators in the session.  The iOS app looks up
+        credentials from its Keychain and responds.
+
+        SECURITY: Never log the returned credentials.
+
+        Returns:
+            ``{"requestId": str, "domain": str, "credentials": [...]}``
+            on success, or ``None`` if user denied / no credentials / timeout.
+        """
+        request_id = str(uuid.uuid4())
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict | None] = loop.create_future()
+        self._pending_credentials[request_id] = future
+
+        await self.emit_event("credential/request", {
+            "requestId": request_id,
+            "domain": domain,
+            "reason": reason,
+        })
+        logger.info("Credential request sent for domain=%s", domain)
+
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending_credentials.pop(request_id, None)
+            logger.info("Credential request timed out for domain=%s", domain)
+            return None
+
+    # ── OAuth Token Refresh ────────────────────────────────────────
+
+    async def request_token_refresh(
+        self,
+        service: str = "google",
+        timeout: float = 30.0,
+    ) -> str | None:
+        """Request a new OAuth token from iOS. BLOCKS until token or timeout.
+
+        Sends ``credential/token:expired`` to the gateway. The gateway
+        broadcasts ``credential/token:refresh`` to iOS operators, which
+        refresh the token and respond. The gateway then delivers a new
+        ``credential/token`` event, resolved by ``_ws_listener``.
+
+        SECURITY: Never log the returned token value.
+
+        Returns:
+            The new token string, or ``None`` if refresh timed out.
+        """
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str | None] = loop.create_future()
+        self._pending_token_refreshes[service] = future
+
+        await self.emit_event("credential/token:expired", {
+            "service": service,
+            "sessionId": self._session_id,
+        })
+        logger.info("OAuth token refresh requested for service=%s", service)
+
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending_token_refreshes.pop(service, None)
+            logger.info("OAuth token refresh timed out for service=%s", service)
+            return None
+
     async def send_request(
         self,
         method: str,
@@ -593,6 +717,7 @@ class MockGatewayClient:
 
     def __init__(self) -> None:
         self._session_id: str = "test-session"
+        self._oauth_tokens: dict[str, str] = {}
 
     async def connect(self) -> None:
         print("[MockGateway] Connected (test mode — stdin/stdout)")
@@ -708,6 +833,34 @@ class MockGatewayClient:
         response = await loop.run_in_executor(None, sys.stdin.readline)
         approved = response.strip().lower() in ("y", "yes")
         return {"approved": approved, "message": "User responded in test mode"}
+
+    async def request_credentials(
+        self,
+        domain: str,
+        reason: str,
+        timeout: float = 30.0,
+    ) -> dict | None:
+        """Mock credential request — prompts in terminal."""
+        print(f"\n  \U0001f511 CREDENTIAL REQUEST for {domain}: {reason}")
+        print("     Username (Enter to skip): ", end="", flush=True)
+        loop = asyncio.get_running_loop()
+        username = (await loop.run_in_executor(None, sys.stdin.readline)).strip()
+        if not username:
+            return None
+        print("     Password: ", end="", flush=True)
+        password = (await loop.run_in_executor(None, sys.stdin.readline)).strip()
+        return {
+            "requestId": str(uuid.uuid4()),
+            "domain": domain,
+            "credentials": [{"username": username, "password": password}],
+        }
+
+    async def request_token_refresh(
+        self, service: str = "google", timeout: float = 30.0,
+    ) -> str | None:
+        """Mock token refresh — returns None (no gateway in test mode)."""
+        logger.info("[MockGateway] Token refresh requested for service=%s", service)
+        return None
 
     async def send_request(self, method: str, payload: dict, timeout: float = 30.0) -> dict:
         """Mock send_request - returns empty success."""

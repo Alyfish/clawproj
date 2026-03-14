@@ -7,6 +7,8 @@ struct ChatView: View {
     @StateObject private var viewModel: ChatViewModel
     @State private var inputText = ""
     @State private var isAtBottom = true
+    @State private var showClearConfirmation = false
+    @State private var showSettings = false
     @FocusState private var isInputFocused: Bool
     @Environment(\.scenePhase) private var scenePhase
 
@@ -30,7 +32,9 @@ struct ChatView: View {
             // Header overlay
             ChatHeaderView(
                 botName: "ClawBot",
-                isOnline: viewModel.connectionState == .connected
+                isOnline: viewModel.connectionState == .connected,
+                onSettings: { showSettings = true },
+                onClear: { showClearConfirmation = true }
             )
         }
         .task {
@@ -44,6 +48,19 @@ struct ChatView: View {
         }
         .sheet(isPresented: $viewModel.showLoginFlow) {
             LoginFlowView(viewModel: viewModel.loginFlowViewModel)
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView(onClearChat: {
+                viewModel.clearMessages()
+            })
+        }
+        .confirmationDialog("Clear Chat", isPresented: $showClearConfirmation) {
+            Button("Clear All Messages", role: .destructive) {
+                viewModel.clearMessages()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will delete all messages in this conversation.")
         }
     }
 
@@ -67,17 +84,12 @@ struct ChatView: View {
                         }
                     }
 
-                    // Thinking steps inline
+                    // Thinking steps — collapsed badge with expand-on-tap
                     if viewModel.showThinkingSteps && !viewModel.thinkingSteps.isEmpty {
-                        ThinkingStepsContainer(
+                        CollapsibleStepsBadge(
                             steps: viewModel.thinkingSteps,
-                            isVisible: viewModel.showThinkingSteps
+                            currentLabel: viewModel.currentShimmerLabel
                         )
-                    }
-
-                    // Shimmer view
-                    if let shimmerLabel = viewModel.currentShimmerLabel {
-                        ThinkingShimmerView(label: shimmerLabel)
                     }
 
                     // Bottom anchor

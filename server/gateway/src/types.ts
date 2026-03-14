@@ -52,6 +52,13 @@ export type {
   ApprovalResolvePayload,
   TaskStopPayload,
   CardActionPayload,
+  CredentialRequestEvent,
+  CredentialResponsePayload,
+  CredentialNonePayload,
+  OAuthTokenDeliverEvent,
+  OAuthTokenExpiredEvent,
+  OAuthTokenRefreshEvent,
+  OAuthTokenRefreshedPayload,
 } from '../../../shared/types/gateway.js';
 
 // ── Gateway-local types ───────────────────────────────────────────
@@ -66,6 +73,8 @@ export interface ConnectPayload {
   sessionId?: string;
   /** Provide a previous deviceToken to attempt reconnection */
   deviceToken?: string;
+  /** Google OAuth access token provided by iOS at connect time */
+  googleOAuthToken?: string;
 }
 
 export interface ConnectResponse {

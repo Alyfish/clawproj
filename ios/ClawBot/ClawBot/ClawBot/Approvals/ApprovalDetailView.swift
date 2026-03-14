@@ -21,6 +21,10 @@ struct ApprovalDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                Text("ClawBot needs your permission before taking this action on your behalf.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
                 headerSection
                 descriptionSection
                 detailsSection

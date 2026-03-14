@@ -4,6 +4,8 @@ struct ContentView: View {
     @StateObject private var webSocket: WebSocketService
     @StateObject private var taskViewModel: TaskFeedViewModel
     @StateObject private var approvalsViewModel: ApprovalsViewModel
+    @StateObject private var credentialHandler: CredentialRequestHandler
+    @StateObject private var tokenRefreshHandler: OAuthTokenRefreshHandler
 
     @State private var selectedTab = 0
 
@@ -19,6 +21,8 @@ struct ContentView: View {
             webSocket: ws,
             approvalStore: ApprovalStore()
         ))
+        _credentialHandler = StateObject(wrappedValue: CredentialRequestHandler(webSocket: ws))
+        _tokenRefreshHandler = StateObject(wrappedValue: OAuthTokenRefreshHandler(webSocket: ws))
     }
 
     var body: some View {
@@ -48,6 +52,16 @@ struct ContentView: View {
                 }
                 .badge(taskViewModel.alertBadgeCount)
                 .tag(3)
+
+            #if DEBUG
+            NavigationStack {
+                DebugCredentialView()
+            }
+            .tabItem {
+                Label("Debug", systemImage: "hammer")
+            }
+            .tag(4)
+            #endif
         }
         .overlay(alignment: .top) {
             if let alert = taskViewModel.bannerAlert {
@@ -71,6 +85,9 @@ struct ContentView: View {
         .task {
             await taskViewModel.loadPersistedData()
             await approvalsViewModel.loadPersistedData()
+            credentialHandler.start()
+            tokenRefreshHandler.start()
+            await GoogleOAuthManager.shared.refreshIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: .deepLinkToWatchlist)) { notification in
             if let watchId = notification.userInfo?["watchId"] as? String {

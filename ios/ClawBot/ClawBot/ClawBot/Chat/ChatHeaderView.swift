@@ -4,6 +4,8 @@ import SwiftUI
 struct ChatHeaderView: View {
     let botName: String
     let isOnline: Bool
+    var onSettings: (() -> Void)? = nil
+    var onClear: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,6 +36,22 @@ struct ChatHeaderView: View {
                 }
 
                 Spacer()
+
+                if let onSettings {
+                    Button(action: onSettings) {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 15))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let onClear {
+                    Button(action: onClear) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 15))
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)

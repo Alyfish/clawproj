@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -321,3 +322,281 @@ async def test_concurrent_send_request_and_chat():
         assert result == {"jobs": []}
     finally:
         client._stop_listener()
+
+
+# ── Credential request/response futures ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_credential_response_resolved_by_listener():
+    """credential/response events resolve pending credential futures."""
+    client, ws = _make_connected_client()
+    client._start_listener()
+
+    try:
+        request_id = str(uuid.uuid4())
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict | None] = loop.create_future()
+        client._pending_credentials[request_id] = future
+
+        ws.inject({
+            "type": "event",
+            "event": "credential/response",
+            "payload": {
+                "requestId": request_id,
+                "domain": "example.com",
+                "credentials": [{"username": "u", "password": "p"}],
+            },
+        })
+
+        result = await asyncio.wait_for(future, timeout=1.0)
+        assert result is not None
+        assert result["credentials"][0]["username"] == "u"
+        assert request_id not in client._pending_credentials
+    finally:
+        client._stop_listener()
+
+
+@pytest.mark.asyncio
+async def test_credential_none_resolved_by_listener():
+    """credential/none events resolve pending credential futures to None."""
+    client, ws = _make_connected_client()
+    client._start_listener()
+
+    try:
+        request_id = str(uuid.uuid4())
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict | None] = loop.create_future()
+        client._pending_credentials[request_id] = future
+
+        ws.inject({
+            "type": "event",
+            "event": "credential/none",
+            "payload": {
+                "requestId": request_id,
+                "domain": "example.com",
+                "reason": "user_denied",
+            },
+        })
+
+        result = await asyncio.wait_for(future, timeout=1.0)
+        assert result is None
+        assert request_id not in client._pending_credentials
+    finally:
+        client._stop_listener()
+
+
+@pytest.mark.asyncio
+async def test_credential_events_not_enqueued():
+    """Credential events are consumed by listener, not put in message queue."""
+    client, ws = _make_connected_client()
+    client._start_listener()
+
+    try:
+        request_id = str(uuid.uuid4())
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict | None] = loop.create_future()
+        client._pending_credentials[request_id] = future
+
+        ws.inject({
+            "type": "event",
+            "event": "credential/response",
+            "payload": {"requestId": request_id, "domain": "x.com", "credentials": []},
+        })
+
+        await asyncio.wait_for(future, timeout=1.0)
+
+        # Also inject a chat message to verify the queue is working
+        ws.inject({
+            "type": "event",
+            "event": "chat/message:new",
+            "payload": {"text": "hello"},
+        })
+
+        msg = await asyncio.wait_for(client._message_queue.get(), timeout=1.0)
+        assert msg["event"] == "chat/message:new"
+        # Queue should only have the chat message, not the credential event
+        assert client._message_queue.empty()
+    finally:
+        client._stop_listener()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_rejects_pending_credentials():
+    """disconnect() rejects all pending credential futures to None."""
+    client, ws = _make_connected_client()
+
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[dict | None] = loop.create_future()
+    client._pending_credentials["cred-1"] = future
+
+    await client.disconnect()
+
+    assert future.done()
+    result = future.result()
+    assert result is None
+    assert len(client._pending_credentials) == 0
+
+
+@pytest.mark.asyncio
+async def test_request_credentials_method():
+    """request_credentials() emits event and waits for response."""
+    client, ws = _make_connected_client()
+    client._start_listener()
+
+    try:
+        async def _respond():
+            await asyncio.sleep(0.05)
+            for raw in ws.sent:
+                msg = json.loads(raw)
+                if msg.get("event") == "credential/request":
+                    request_id = msg["payload"]["requestId"]
+                    ws.inject({
+                        "type": "event",
+                        "event": "credential/response",
+                        "payload": {
+                            "requestId": request_id,
+                            "domain": "test.com",
+                            "credentials": [{"username": "u", "password": "p"}],
+                        },
+                    })
+                    return
+
+        responder = asyncio.create_task(_respond())
+        result = await asyncio.wait_for(
+            client.request_credentials("test.com", "reason"),
+            timeout=2.0,
+        )
+        await responder
+
+        assert result is not None
+        assert result["credentials"][0]["username"] == "u"
+    finally:
+        client._stop_listener()
+
+
+# ── OAuth token delivery ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_credential_token_sets_env():
+    """credential/token events set os.environ and store in _oauth_tokens."""
+    client, ws = _make_connected_client()
+    client._start_listener()
+
+    try:
+        ws.inject({
+            "type": "event",
+            "event": "credential/token",
+            "payload": {"service": "google", "token": "test-token-123", "sessionId": "s1"},
+        })
+        await asyncio.sleep(0.1)
+
+        assert client._oauth_tokens.get("google") == "test-token-123"
+        assert os.environ.get("GOOGLE_WORKSPACE_CLI_TOKEN") == "test-token-123"
+    finally:
+        client._stop_listener()
+        os.environ.pop("GOOGLE_WORKSPACE_CLI_TOKEN", None)
+
+
+@pytest.mark.asyncio
+async def test_credential_token_resolves_refresh_future():
+    """credential/token resolves a pending token refresh future."""
+    client, ws = _make_connected_client()
+    client._start_listener()
+
+    try:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str | None] = loop.create_future()
+        client._pending_token_refreshes["google"] = future
+
+        ws.inject({
+            "type": "event",
+            "event": "credential/token",
+            "payload": {"service": "google", "token": "refreshed-token", "sessionId": "s1"},
+        })
+
+        result = await asyncio.wait_for(future, timeout=1.0)
+        assert result == "refreshed-token"
+        assert "google" not in client._pending_token_refreshes
+    finally:
+        client._stop_listener()
+        os.environ.pop("GOOGLE_WORKSPACE_CLI_TOKEN", None)
+
+
+@pytest.mark.asyncio
+async def test_credential_token_not_enqueued():
+    """credential/token events are consumed by listener, not put in message queue."""
+    client, ws = _make_connected_client()
+    client._start_listener()
+
+    try:
+        ws.inject({
+            "type": "event",
+            "event": "credential/token",
+            "payload": {"service": "google", "token": "t", "sessionId": "s1"},
+        })
+        # Also inject a chat message
+        ws.inject({
+            "type": "event",
+            "event": "chat/message:new",
+            "payload": {"text": "hello"},
+        })
+
+        msg = await asyncio.wait_for(client._message_queue.get(), timeout=1.0)
+        assert msg["event"] == "chat/message:new"
+        assert client._message_queue.empty()
+    finally:
+        client._stop_listener()
+        os.environ.pop("GOOGLE_WORKSPACE_CLI_TOKEN", None)
+
+
+@pytest.mark.asyncio
+async def test_request_token_refresh_emits_expired_event():
+    """request_token_refresh emits credential/token:expired and waits."""
+    client, ws = _make_connected_client()
+    client._start_listener()
+
+    try:
+        async def _respond():
+            await asyncio.sleep(0.05)
+            ws.inject({
+                "type": "event",
+                "event": "credential/token",
+                "payload": {"service": "google", "token": "new-token", "sessionId": "s1"},
+            })
+
+        responder = asyncio.create_task(_respond())
+        result = await asyncio.wait_for(
+            client.request_token_refresh("google"),
+            timeout=2.0,
+        )
+        await responder
+
+        assert result == "new-token"
+        # Verify the expired event was emitted
+        expired_events = [
+            json.loads(m) for m in ws.sent
+            if "credential/token:expired" in m
+        ]
+        assert len(expired_events) >= 1
+        assert expired_events[0]["payload"]["service"] == "google"
+    finally:
+        client._stop_listener()
+        os.environ.pop("GOOGLE_WORKSPACE_CLI_TOKEN", None)
+
+
+@pytest.mark.asyncio
+async def test_disconnect_rejects_pending_token_refreshes():
+    """disconnect() rejects pending token refresh futures to None."""
+    client, ws = _make_connected_client()
+
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[str | None] = loop.create_future()
+    client._pending_token_refreshes["google"] = future
+
+    await client.disconnect()
+
+    assert future.done()
+    assert future.result() is None
+    assert len(client._pending_token_refreshes) == 0

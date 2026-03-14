@@ -27,7 +27,15 @@ final class ChatViewModel: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
     private var currentStreamingMessageId: UUID?
-    private var sessionId: String = UUID().uuidString
+    private var sessionId: String = {
+        let key = "clawbot_session_id"
+        if let existing = UserDefaults.standard.string(forKey: key) {
+            return existing
+        }
+        let newId = UUID().uuidString
+        UserDefaults.standard.set(newId, forKey: key)
+        return newId
+    }()
 
     // MARK: - Init
 
@@ -80,6 +88,18 @@ final class ChatViewModel: ObservableObject {
             messages = loaded
         } catch {
             log("failed to load messages: \(error.localizedDescription)")
+        }
+    }
+
+    func clearMessages() {
+        messages = []
+        thinkingSteps = []
+        currentStreamingMessageId = nil
+        showThinkingSteps = false
+        currentShimmerLabel = nil
+        let id = sessionId
+        Task {
+            try? await messageStore.delete(sessionId: id)
         }
     }
 
@@ -148,6 +168,10 @@ final class ChatViewModel: ObservableObject {
                 messages.append(msg)
                 persistMessages()
             }
+        case .credentialRequested:
+            break // handled by CredentialRequestHandler
+        case .tokenRefreshRequested:
+            break // handled by OAuthTokenRefreshHandler
         case .watchUpdate, .watchlistAlert:
             break // handled by TaskFeedViewModel
         case .unknown:

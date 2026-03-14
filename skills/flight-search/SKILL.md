@@ -401,54 +401,58 @@ A single flight may receive at most one label. Priority: Best Overall > Cheapest
 
 ## Card Output
 
-For each top result, create a FlightCard using the `create_card` tool. The metadata must match the `FlightCard` interface in `shared/types/cards.ts`.
+**Use CARDS_JSON: batching** — do NOT call `create_card` separately for each flight. Instead, have your bash/code_execution script output a `CARDS_JSON:` marker followed by a JSON array of all flight cards. The system auto-emits all cards from one tool call, which is significantly faster.
 
-```
-Tool: create_card
-{
-  "type": "flight",
-  "id": "flight-ba286-sfo-lhr-20250315",
-  "title": "BA 286 — SFO to LHR",
-  "subtitle": "British Airways | Nonstop | Economy",
-  "createdAt": "2025-03-01T12:00:00Z",
-  "airline": "British Airways",
-  "route": {"from": "SFO", "to": "LHR"},
-  "departure": "2025-03-15T17:00:00Z",
-  "arrival": "2025-03-16T11:30:00+00:00",
-  "duration": "10h 30m",
-  "layovers": 0,
-  "price": {"amount": 489.00, "currency": "USD"},
-  "baggage": "1 checked bag (23kg)",
-  "refundPolicy": "Non-refundable",
-  "pointsValue": {"program": "Oneworld", "points": 5500},
-  "ranking": {
-    "label": "Best Overall",
-    "reason": "Best combination of price ($489), nonstop route, and travel time (10h 30m)"
-  },
-  "metadata": {
-    "flightNumber": "BA 286",
-    "cabin": "ECONOMY",
-    "aircraft": "Boeing 777"
-  },
-  "actions": [
-    {
-      "id": "book-ba286",
-      "label": "View on British Airways",
-      "type": "link",
-      "url": "https://www.britishairways.com"
+Each card in the array must match the `FlightCard` interface from `shared/types/cards.ts`:
+
+```json
+CARDS_JSON:[
+  {
+    "type": "flight",
+    "id": "flight-ba286-sfo-lhr-20250315",
+    "title": "BA 286 — SFO to LHR",
+    "subtitle": "British Airways | Nonstop | Economy",
+    "airline": "British Airways",
+    "route": {"from": "SFO", "to": "LHR"},
+    "departure": "2025-03-15T17:00:00Z",
+    "arrival": "2025-03-16T11:30:00+00:00",
+    "duration": "10h 30m",
+    "layovers": 0,
+    "price": {"amount": 489.00, "currency": "USD"},
+    "baggage": "1 checked bag (23kg)",
+    "refundPolicy": "Non-refundable",
+    "pointsValue": {"program": "Oneworld", "points": 5500},
+    "ranking": {
+      "label": "Best Overall",
+      "reason": "Best combination of price ($489), nonstop route, and travel time (10h 30m)"
     },
-    {
-      "id": "watch-ba286",
-      "label": "Watch Price",
-      "type": "custom",
-      "payload": {"action": "watch_price", "flight_id": "ba286-sfo-lhr-20250315"}
-    }
-  ],
-  "source": "Amadeus"
-}
+    "metadata": {
+      "flightNumber": "BA 286",
+      "cabin": "ECONOMY",
+      "aircraft": "Boeing 777"
+    },
+    "actions": [
+      {
+        "id": "book-ba286",
+        "label": "View on British Airways",
+        "type": "link",
+        "url": "https://www.britishairways.com"
+      },
+      {
+        "id": "watch-ba286",
+        "label": "Watch Price",
+        "type": "custom",
+        "payload": {"action": "watch_price", "flight_id": "ba286-sfo-lhr-20250315"}
+      }
+    ],
+    "source": "Amadeus"
+  }
+]
 ```
 
-**Present the top 5 results** as FlightCards, sorted by ranking score descending. Always include the Cheapest and Fastest flights even if they aren't in the top 5 by combined score.
+The `CARDS_JSON:` marker must be the LAST line of bash stdout. The system strips it before passing output to Claude and auto-emits all cards. Fields `id`, `source`, and `createdAt` are auto-populated if omitted.
+
+**Present the top 3 results** as FlightCards, sorted by ranking score descending. Always include the Cheapest and Fastest flights even if they aren't in the top 3 by combined score. If the user asks for more results, show up to 5. Never create more than 5 FlightCards in a single response.
 
 
 ## Price Monitoring
@@ -655,21 +659,16 @@ Then present FlightCards exactly as you would for real results (with ranking, so
 1. Resolve "next Friday" and "following Sunday" to specific ISO dates
 2. Resolve "London" to LHR (primary) — mention LGW as alternative
 3. Check credentials: amadeus -> serpapi -> mock
-4. Execute search
-5. Parse and rank results
-6. Create FlightCards for top 5
+4. Execute search with bash/code_execution — parse, rank, and output CARDS_JSON: array in one tool call
+5. Provide text summary after cards auto-render
 
 **Agent response:**
 
 "I'll search for round-trip flights from SFO to London Heathrow (LHR), departing Friday March 14 and returning Sunday March 16. Searching now..."
 
-[Executes API call or generates mock data]
+[Executes bash: API call + parse + rank → stdout ends with CARDS_JSON:[...] → 3 FlightCards auto-render]
 
-"Found 24 options. Here are the top 5:"
-
-[Presents 5 FlightCards with labels: Best Overall, Cheapest, Fastest, etc.]
-
-"Prices range from $389 to $1,250. The nonstop British Airways flight at $489 offers the best overall value. Want me to watch any of these for price drops?"
+"Found 24 options. Here are the top 3: Prices range from $389 to $1,250. The nonstop British Airways flight at $489 offers the best overall value. Want me to watch any of these for price drops?"
 
 **User:** "Watch the cheapest one for price drops"
 
@@ -682,7 +681,7 @@ Then present FlightCards exactly as you would for real results (with ranking, so
 
 1. **Always confirm details before searching:** Verify dates, passenger count, cabin class, and airports. If ambiguous ("next week"), resolve to specific dates and confirm with the user.
 
-2. **Present results sorted by ranking score** with clear labels. Show at minimum the top 5 results.
+2. **Present results sorted by ranking score** with clear labels. Show the top 3 results by default (up to 5 if the user requests more).
 
 3. **Include price disclaimer:** After results, add: "Prices may vary. Check airline website for current pricing."
 
@@ -698,6 +697,6 @@ Then present FlightCards exactly as you would for real results (with ranking, so
 
 ## Output Format
 
-When your bash command finds results, end output with CARDS_JSON: followed by a JSON array. Cards auto-render on the user's phone — no need to call create_card separately.
+**IMPORTANT:** End your bash/code_execution output with `CARDS_JSON:` followed by a JSON array of full FlightCard objects (see Card Output section above for the complete schema). Do NOT call `create_card` separately — CARDS_JSON batching emits all cards from one tool call, cutting response time by 30-40%.
 
-CARDS_JSON:[{"type":"flight","title":"SFO → LHR $450","metadata":{"airline":"BA","departure":"10:30","arrival":"06:30+1","duration":"11h","price":"$450","route":"SFO → LHR"},"actions":["Book","Watch Price","Share"]}]
+After the cards auto-render, always provide a text summary: mention the price range, highlight the best deal, and ask if the user wants to watch any for price drops.

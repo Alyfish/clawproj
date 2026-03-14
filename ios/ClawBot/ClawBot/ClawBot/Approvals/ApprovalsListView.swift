@@ -68,9 +68,11 @@ struct ApprovalsListView: View {
             Text("No pending approvals")
                 .font(.headline)
                 .foregroundStyle(.secondary)
-            Text("You're all clear.")
+            Text("When ClawBot wants to book, pay, send, or take other actions on your behalf, it will ask for your approval here first.")
                 .font(.subheadline)
                 .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
         }
     }
 

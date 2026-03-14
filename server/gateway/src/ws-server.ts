@@ -25,6 +25,7 @@ const ConnectPayloadSchema = z.object({
   authToken: z.string().optional(),
   sessionId: z.string().optional(),
   deviceToken: z.string().optional(),
+  googleOAuthToken: z.string().optional(),
 });
 
 function log(
@@ -298,6 +299,9 @@ export default class GatewayServer {
     this.sessionManager.addClient(sessionId, client);
     this.connections.set(deviceToken, client);
 
+    // Notify router about the new connection (for OAuth token delivery)
+    this.router.onClientConnected(client, payload);
+
     // Wire up post-handshake message handler
     ws.on('message', (data) => {
       client.lastSeen = new Date().toISOString();
@@ -361,6 +365,9 @@ export default class GatewayServer {
   private handleDisconnect(client: ConnectedClient): void {
     this.connections.delete(client.deviceToken);
     this.sessionManager.removeClient(client.deviceToken, client.sessionId);
+
+    // Notify router for cleanup (token eviction when session empty)
+    this.router.onClientDisconnected(client.sessionId);
 
     log('info', 'client:disconnected', {
       deviceToken: client.deviceToken,

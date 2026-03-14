@@ -16,6 +16,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -47,6 +50,41 @@ MAX_RETRIES = 3
 _RETRIABLE_SERVER_ERRORS: tuple[type[Exception], ...] = (anthropic.InternalServerError,)
 if hasattr(anthropic, "OverloadedError"):
     _RETRIABLE_SERVER_ERRORS = (anthropic.InternalServerError, anthropic.OverloadedError)
+
+# ── Auth pre-warming ──────────────────────────────────────────
+
+AUTH_KEYWORDS = frozenset({
+    "cart", "add to cart", "buy", "purchase", "checkout", "order",
+    "wishlist", "save for later", "my account", "my orders",
+})
+
+DOMAIN_PATTERNS: dict[str, str] = {
+    "amazon": "amazon.com", "stockx": "stockx.com", "nike": "nike.com",
+    "ebay": "ebay.com", "walmart": "walmart.com", "target": "target.com",
+    "goat": "goat.com", "grailed": "grailed.com", "footlocker": "footlocker.com",
+    "bestbuy": "bestbuy.com",
+}
+
+COMPLETION_SIGNALS = frozenset({
+    "added", "purchased", "in your cart", "completed", "confirmed",
+    "placed", "could not", "failed", "unable", "error",
+})
+
+
+def detect_auth_intent(message: str) -> tuple[bool, str | None]:
+    """Check if task needs auth and extract domain."""
+    msg_lower = message.lower()
+    needs_auth = any(kw in msg_lower for kw in AUTH_KEYWORDS)
+    domain = None
+    for name, dom in DOMAIN_PATTERNS.items():
+        if name in msg_lower:
+            domain = dom
+            break
+    if not domain:
+        match = re.search(r'(\w+\.com)', msg_lower)
+        if match:
+            domain = match.group(1)
+    return needs_auth, domain
 
 
 # ── Fallback response types (duck-type compatible with anthropic.types.Message) ──
@@ -315,6 +353,8 @@ class Agent:
         skill_registry: SkillRegistry,
         tool_registry: ToolRegistry,
         login_flow_manager: Any = None,
+        credential_manager: Any = None,
+        login_handler: Any = None,
     ) -> None:
         self.config = config
         self.gateway = gateway_client
@@ -322,6 +362,13 @@ class Agent:
         self.skill_registry = skill_registry
         self.tool_registry = tool_registry
         self._login_flow = login_flow_manager
+        self._login_handler = login_handler
+
+        # Bash credential helper for auth retry
+        self._bash_cred_helper: Any = None
+        if credential_manager is not None:
+            from server.agent.tools.bash_credential_helper import BashCredentialHelper
+            self._bash_cred_helper = BashCredentialHelper(credential_manager)
 
         self.client = anthropic.AsyncAnthropic(
             api_key=config.api_key or None  # None → reads ANTHROPIC_API_KEY env
@@ -454,16 +501,16 @@ class Agent:
             parts.append(json.dumps(previous.get("data", {}), indent=2))
             parts.append("Compare current data to this and note any changes.")
         parts.append(
-            "\nExecute the check. If the monitoring script outputs STATUS: CHANGED, "
+            "\nExecute the check ONCE. If the monitoring script outputs STATUS: CHANGED, "
             "call emit_alert with the details. If STATUS: NO_CHANGE or FIRST_RUN, "
-            "do nothing — don't message the user."
+            "do nothing — don't message the user. Do NOT re-run the script."
         )
 
         synthetic_msg = "\n".join(parts)
         logger.info("Executing scheduled task %s: %s", job_id, task_description)
 
         try:
-            await self.process_message(synthetic_msg, session_id)
+            await self.process_message(synthetic_msg, session_id, max_iterations=2)
             # Report success back to scheduler
             await self.gateway.emit_event("schedule/task:result", {
                 "jobId": job_id,
@@ -513,7 +560,7 @@ class Agent:
 
     # ── THE CORE: process_message ─────────────────────────────
 
-    async def process_message(self, user_message: str, session_id: str) -> None:
+    async def process_message(self, user_message: str, session_id: str, max_iterations: int | None = None) -> None:
         """
         THE agentic loop.
 
@@ -526,6 +573,8 @@ class Agent:
         self._active_runs[run_id] = True
 
         self._current_user_message = user_message
+        run_start = time.monotonic()
+        needs_auth, auth_domain = detect_auth_intent(user_message)
 
         # Initialize session context for data verification tracking
         if session_id not in self._session_contexts:
@@ -548,10 +597,20 @@ class Agent:
             messages = self.context_builder.build_messages(history, user_message)
             tools = self._build_claude_tools()
 
+            # Pre-warm auth for detected domain
+            if needs_auth and auth_domain and self._login_handler is not None:
+                logger.info("Task requires auth for %s, pre-warming credentials", auth_domain)
+                try:
+                    result = await self._login_handler.pre_warm_auth(auth_domain)
+                    logger.info("Pre-warm result: %s", result)
+                except Exception as e:
+                    logger.warning("Pre-warm failed (will retry at login time): %s", e)
+
             # 3. THE LOOP
             iteration = 0
+            loop_limit = max_iterations or self.config.max_iterations
 
-            while iteration < self.config.max_iterations:
+            while iteration < loop_limit:
                 iteration += 1
 
                 # Check cancellation
@@ -565,9 +624,13 @@ class Agent:
                     run_id, iteration, self.config.max_iterations,
                 )
 
+                # Inject elapsed time into system prompt
+                elapsed = int(time.monotonic() - run_start)
+                effective_system = f"{system_prompt}\n\nYou have been running for {elapsed}s. Each tool call costs 1-10s. Be fast."
+
                 # Call Claude with streaming + retry
                 final_message = await self._call_claude_with_retry(
-                    system_prompt, messages, tools, session_id, run_id,
+                    effective_system, messages, tools, session_id, run_id,
                 )
                 if final_message is None:
                     break  # Unrecoverable API error (already messaged user)
@@ -607,16 +670,36 @@ class Agent:
             else:
                 # Hit max iterations
                 logger.warning(
-                    "[%s] Hit max iterations (%d)", run_id, self.config.max_iterations,
+                    "[%s] Hit max iterations (%d)", run_id, loop_limit,
                 )
                 overflow_msg = (
-                    f"\n\n[Reached maximum of {self.config.max_iterations} tool iterations. "
+                    f"\n\n[Reached maximum of {loop_limit} tool iterations. "
                     f"Stopping to prevent runaway loops. You can continue by sending another message.]"
                 )
                 await self.gateway.stream_text(overflow_msg, session_id)
 
             # Save conversation history
             self._histories[session_id] = messages
+
+            # Completion check (log-only)
+            if needs_auth and messages:
+                last_msg = messages[-1]
+                if last_msg.get("role") == "assistant":
+                    response_text = ""
+                    content = last_msg.get("content", [])
+                    if isinstance(content, list):
+                        response_text = " ".join(
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    elif isinstance(content, str):
+                        response_text = content
+                    if response_text and not any(
+                        sig in response_text.lower() for sig in COMPLETION_SIGNALS
+                    ):
+                        logger.warning(
+                            "Action task completion not verified in agent response"
+                        )
 
         finally:
             self._active_runs.pop(run_id, None)
@@ -935,6 +1018,12 @@ class Agent:
             if tool_name == "bash_execute" and result.success:
                 result = await self._auto_emit_cards(result, task_id, session_id)
 
+            # Auth failure detection + credential retry for bash
+            if tool_name == "bash_execute" and not result.success:
+                result = await self._handle_bash_auth_failure(
+                    result, tool_input, session_id,
+                )
+
             # Record tool call in session context
             if session_ctx:
                 command = tool_input.get("command", "") if tool_name == "bash_execute" else ""
@@ -1058,6 +1147,164 @@ class Agent:
         result.output = {**result.output, "stdout": stripped}
         return result
 
+    # ── Bash auth failure retry ──────────────────────────────
+
+    async def _handle_bash_auth_failure(
+        self,
+        result: ToolResult,
+        tool_input: dict[str, Any],
+        session_id: str,
+    ) -> ToolResult:
+        """Detect auth failures in bash output, attempt credential injection.
+
+        Uses AuthDetector to identify auth failures, then
+        BashCredentialHelper.prepare_execution() to build an
+        AuthenticatedExecution recipe (netrc, GIT_ASKPASS, env vars,
+        stdin pipe) and retries the command transparently.
+        """
+        if self._bash_cred_helper is None:
+            return result
+
+        from server.agent.tools.auth_detector import AuthDetector
+        from server.agent.tools.bash_credential_helper import BashCredentialHelper
+
+        output = result.output if isinstance(result.output, dict) else {}
+        command = tool_input.get("command", "")
+
+        auth_info = AuthDetector.detect(
+            stdout=output.get("stdout", ""),
+            stderr=output.get("stderr", ""),
+            exit_code=output.get("exit_code", -1),
+            command=command,
+        )
+        if auth_info is None:
+            return result
+
+        # gws commands use OAuth token refresh, not username/password
+        if command.strip().startswith("gws ") or auth_info.get("tool") == "gws":
+            return await self._handle_gws_token_refresh(
+                result, tool_input, session_id,
+            )
+
+        tool_type = auth_info["tool"]
+        domain = auth_info["domain"] or "unknown"
+
+        logger.info(
+            "Auth failure detected: tool=%s domain=%s confidence=%.2f",
+            tool_type, domain, auth_info["confidence"],
+        )
+
+        # Build authenticated execution recipe
+        execution = None
+        try:
+            execution = await self._bash_cred_helper.prepare_execution(
+                domain=domain,
+                tool_hint=tool_type,
+                command=command,
+                reason=f"Authentication required for {tool_type} command targeting {domain}",
+            )
+        except Exception as e:
+            logger.warning("Credential preparation failed for domain=%s: %s", domain, e)
+
+        if execution is None:
+            # No credentials available — append hint to error
+            hint = (
+                f"[Auth failure detected for {domain}. "
+                f"No credentials available — add credentials for this "
+                f"domain via the iOS app.]"
+            )
+            return result.replace(
+                error=f"{result.error or ''}\n\n{hint}".strip(),
+            )
+
+        # Retry with credentials
+        await self.gateway.stream_thinking(
+            "bash_execute",
+            f"Auth failure detected ({tool_type}), retrying with credentials...",
+            "running", session_id,
+        )
+
+        bash_tool = self.tool_registry.get("bash_execute")
+        if bash_tool is None:
+            BashCredentialHelper.cleanup(execution)
+            return result
+
+        try:
+            retry_result = await bash_tool.execute_authenticated(
+                execution=execution,
+                timeout=tool_input.get("timeout", 30),
+                working_dir=tool_input.get("working_dir", "/workspace"),
+            )
+        finally:
+            BashCredentialHelper.cleanup(execution)
+
+        if not retry_result.success:
+            self._bash_cred_helper.record_credential_failure(domain)
+
+        return retry_result
+
+    # ── gws OAuth token refresh ───────────────────────────────
+
+    async def _handle_gws_token_refresh(
+        self,
+        result: ToolResult,
+        tool_input: dict[str, Any],
+        session_id: str,
+    ) -> ToolResult:
+        """Handle gws 401 by requesting OAuth token refresh from iOS.
+
+        Unlike ``_handle_bash_auth_failure`` which uses username/password
+        credentials, gws uses Google OAuth tokens that the iOS app
+        refreshes and delivers via ``credential/token`` events.
+        """
+        from server.agent.tools.bash_credential_helper import AuthenticatedExecution
+
+        await self.gateway.stream_thinking(
+            "bash_execute",
+            "Google token expired, requesting refresh...",
+            "running", session_id,
+        )
+
+        new_token = await self.gateway.request_token_refresh(
+            "google", timeout=30.0,
+        )
+        if new_token is None:
+            hint = (
+                "[Google OAuth token expired. Open the ClawBot iOS app "
+                "to re-authenticate with Google.]"
+            )
+            return ToolResult(
+                success=result.success,
+                output=result.output,
+                error=f"{result.error or ''}\n\n{hint}".strip(),
+            )
+
+        # Token already set in os.environ by the gateway_client listener.
+        # Build a minimal AuthenticatedExecution to retry via
+        # execute_authenticated (skips blocklist/approval checks).
+        command = tool_input.get("command", "")
+        execution = AuthenticatedExecution(
+            strategy="gws_oauth",
+            domain="google",
+            modified_command=command,
+            env_additions={"GOOGLE_WORKSPACE_CLI_TOKEN": new_token},
+        )
+
+        bash_tool = self.tool_registry.get("bash_execute")
+        if bash_tool is None:
+            return result
+
+        retry_result = await bash_tool.execute_authenticated(
+            execution=execution,
+            timeout=tool_input.get("timeout", 30),
+            working_dir=tool_input.get("working_dir", "/workspace"),
+        )
+
+        # Nil token reference
+        new_token = None  # noqa: F841
+
+        return retry_result
+
     # ── History management ────────────────────────────────────
 
     def clear_history(self, session_id: str) -> None:
@@ -1078,3 +1325,8 @@ class Agent:
                 await self._login_flow.shutdown()
             except Exception as e:
                 logger.warning("Login flow shutdown error: %s", e)
+
+        if self._bash_cred_helper is not None:
+            self._bash_cred_helper.clear_cache()
+
+        os.environ.pop("GOOGLE_WORKSPACE_CLI_TOKEN", None)

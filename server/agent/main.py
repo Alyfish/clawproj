@@ -86,7 +86,7 @@ async def main(args: argparse.Namespace) -> None:
     print(f"   Credentials: {config.credentials_path}")
 
     # Tools (async adapter for save/search tools)
-    tool_registry, login_flow_manager = create_registry(
+    tool_registry, login_flow_manager, credential_manager, login_handler = create_registry(
         gateway_client=None,  # set after gateway init
         memory_system=memory_adapter,
         credential_store=credential_store.get_for_tool,
@@ -117,6 +117,10 @@ async def main(args: argparse.Namespace) -> None:
     if login_flow_manager is not None:
         login_flow_manager._gateway = gateway
 
+    # Wire gateway to credential manager (created before gateway existed)
+    if credential_manager is not None:
+        credential_manager.set_gateway_client(gateway)
+
     # 4. Create the agent
     agent = Agent(
         config=config,
@@ -125,6 +129,8 @@ async def main(args: argparse.Namespace) -> None:
         skill_registry=skill_registry,
         tool_registry=tool_registry,
         login_flow_manager=login_flow_manager,
+        credential_manager=credential_manager,
+        login_handler=login_handler,
     )
 
     # 5. Connect and run

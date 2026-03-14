@@ -138,8 +138,15 @@ _ALLOWED_ENV_VARS: dict[str, str | None] = {
 _BLOCKED_ENV_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
-def _build_env() -> dict[str, str]:
-    """Build a filtered environment dict for the subprocess."""
+def _build_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a filtered environment dict for the subprocess.
+
+    Args:
+        extra: Additional env vars from trusted credential pipeline
+            (BashCredentialHelper).  These bypass the blocked-substring
+            filter because they originate from internal code, not
+            untrusted input.
+    """
     env: dict[str, str] = {}
     for name, default in _ALLOWED_ENV_VARS.items():
         # Safety: never pass through vars with secret-like names
@@ -148,7 +155,15 @@ def _build_env() -> dict[str, str]:
         value = default if default is not None else os.environ.get(name)
         if value is not None:
             env[name] = value
+    if extra:
+        env.update(extra)
     return env
+
+
+def _is_gws_command(command: str) -> bool:
+    """Check if a command invokes the gws CLI."""
+    stripped = command.strip()
+    return stripped.startswith("gws ") or stripped == "gws"
 
 
 # ------------------------------------------------------------------
@@ -161,10 +176,15 @@ class BashExecuteTool(BaseTool):
 
     def __init__(self, gateway_client: Optional[Any] = None) -> None:
         self._gateway_client = gateway_client
+        self._bash_credential_helper: Optional[Any] = None
 
     def set_gateway_client(self, client: Any) -> None:
         """Wire gateway client after initialization."""
         self._gateway_client = client
+
+    def set_bash_credential_helper(self, helper: Any) -> None:
+        """Wire BashCredentialHelper after initialization."""
+        self._bash_credential_helper = helper
 
     # -- metadata --------------------------------------------------
 
@@ -222,6 +242,34 @@ class BashExecuteTool(BaseTool):
                     "Working directory for the command "
                     "(default /workspace)."
                 ),
+            },
+            "authenticate": {
+                "type": "object",
+                "required": False,
+                "description": (
+                    "Inject credentials securely before running. "
+                    "Provide {domain, tool_hint, reason}. "
+                    "tool_hint: curl, wget, git, gh, npm, docker, generic. "
+                    "Credentials injected via netrc files, env vars, or "
+                    "stdin — NEVER as command arguments."
+                ),
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Domain to authenticate against.",
+                    },
+                    "tool_hint": {
+                        "type": "string",
+                        "description": (
+                            "CLI tool: curl, wget, git, gh, npm, "
+                            "docker, generic."
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why auth is needed (shown to user).",
+                    },
+                },
             },
         }
 
@@ -283,26 +331,182 @@ class BashExecuteTool(BaseTool):
                     "Cannot proceed without user approval."
                 )
 
-        # 6. Build filtered env
-        env = _build_env()
+        # 5.5 Credential injection (authenticate parameter)
+        auth_execution = None
+        auth_param = kwargs.get("authenticate")
+        if auth_param and isinstance(auth_param, dict) and self._bash_credential_helper:
+            try:
+                auth_execution = await self._bash_credential_helper.prepare_execution(
+                    domain=auth_param.get("domain", ""),
+                    tool_hint=auth_param.get("tool_hint", "generic"),
+                    command=command,
+                    reason=auth_param.get("reason", ""),
+                )
+                if auth_execution:
+                    command = auth_execution.modified_command
+            except Exception as e:
+                logger.warning("Credential injection failed: %s", e)
 
-        # 7. Run subprocess
+        try:
+            # 6. Build filtered env (auth + gws token bypass blocked-substring filter)
+            extra_env: dict[str, str] = {}
+            if _is_gws_command(command):
+                gws_token = os.environ.get("GOOGLE_WORKSPACE_CLI_TOKEN")
+                if gws_token:
+                    extra_env["GOOGLE_WORKSPACE_CLI_TOKEN"] = gws_token
+            if auth_execution and auth_execution.env_additions:
+                extra_env.update(auth_execution.env_additions)
+            env = _build_env(extra=extra_env or None)
+
+            # 7. Run subprocess
+            stdin_data = None
+            if auth_execution and auth_execution.stdin_input:
+                stdin_data = auth_execution.stdin_input.encode("utf-8")
+
+            try:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    stdin=asyncio.subprocess.PIPE if stdin_data else None,
+                    cwd=str(work_path),
+                    env=env,
+                )
+            except Exception as e:
+                return self.fail(f"Failed to start process: {e}")
+
+            # 8. Wait with timeout
+            timed_out = False
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    process.communicate(input=stdin_data), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                timed_out = True
+                stdout_bytes = b""
+                stderr_bytes = b""
+
+            # 9. Decode and truncate
+            stdout = stdout_bytes.decode("utf-8", errors="replace")
+            stderr = stderr_bytes.decode("utf-8", errors="replace")
+            truncated = False
+
+            if len(stdout) > MAX_STDOUT:
+                stdout = stdout[:MAX_STDOUT] + TRUNCATION_MSG
+                truncated = True
+            if len(stderr) > MAX_STDERR:
+                stderr = stderr[:MAX_STDERR] + TRUNCATION_MSG
+                truncated = True
+
+            exit_code = process.returncode if not timed_out else -1
+
+            # 9.5 Output size hints — teach the agent to save-to-file
+            hint = ""
+            stdout_len = len(stdout)
+            if stdout_len > 20_000:
+                hint = (
+                    f"\n\n[Warning: Very large output ({stdout_len // 1000}KB). "
+                    "Next time, redirect to file: "
+                    "command > /workspace/data/output.json && "
+                    "jq '.key' /workspace/data/output.json]"
+                )
+            elif stdout_len > 5_000:
+                hint = (
+                    "\n\n[Hint: Large output. Consider saving to "
+                    "/workspace/data/ and using jq/grep to extract "
+                    "specific parts.]"
+                )
+
+            # 10. Return result
+            output = {
+                "stdout": stdout + hint,
+                "stderr": stderr,
+                "exit_code": exit_code,
+                "timed_out": timed_out,
+                "truncated": truncated,
+            }
+
+            if timed_out:
+                return ToolResult(
+                    success=False,
+                    output=output,
+                    error=f"Command timed out after {timeout}s",
+                )
+
+            return ToolResult(
+                success=exit_code == 0,
+                output=output,
+                error=stderr.strip() if exit_code != 0 else None,
+            )
+        finally:
+            # Cleanup credential temp files
+            if auth_execution:
+                from server.agent.tools.bash_credential_helper import (
+                    BashCredentialHelper,
+                )
+                BashCredentialHelper.cleanup(auth_execution)
+                auth_execution = None
+
+    # -- credential retry ------------------------------------------
+
+    async def execute_authenticated(
+        self,
+        execution: Any,
+        timeout: int = DEFAULT_TIMEOUT,
+        working_dir: str = DEFAULT_WORKING_DIR,
+    ) -> ToolResult:
+        """Re-execute a command using an AuthenticatedExecution recipe.
+
+        Internal method — NOT exposed as a tool parameter.
+        Called by agent.py auth retry logic after AuthDetector
+        identifies an authentication failure.
+
+        Skips blocklist/approval checks (already passed on first attempt).
+
+        Args:
+            execution: AuthenticatedExecution recipe from BashCredentialHelper.
+                Contains modified_command, env_additions, stdin_input,
+                and cleanup_paths.
+            timeout: Max execution time in seconds.
+            working_dir: Working directory for the command.
+
+        SECURITY:
+          env_additions bypass the blocked-substring filter via
+          ``_build_env(extra=...)``.  Temp files (netrc, GIT_ASKPASS)
+          are cleaned up by the caller via BashCredentialHelper.cleanup().
+        """
+        timeout = max(1, min(int(timeout), MAX_TIMEOUT))
+        work_path = Path(working_dir)
+        try:
+            work_path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+
+        env = _build_env(extra=execution.env_additions or None)
+        stdin_data = (
+            execution.stdin_input.encode("utf-8")
+            if execution.stdin_input
+            else None
+        )
+
         try:
             process = await asyncio.create_subprocess_shell(
-                command,
+                execution.modified_command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.PIPE if stdin_data else None,
                 cwd=str(work_path),
                 env=env,
             )
         except Exception as e:
             return self.fail(f"Failed to start process: {e}")
 
-        # 8. Wait with timeout
         timed_out = False
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                process.communicate(), timeout=timeout
+                process.communicate(input=stdin_data), timeout=timeout,
             )
         except asyncio.TimeoutError:
             process.kill()
@@ -311,7 +515,6 @@ class BashExecuteTool(BaseTool):
             stdout_bytes = b""
             stderr_bytes = b""
 
-        # 9. Decode and truncate
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
         truncated = False
@@ -325,26 +528,8 @@ class BashExecuteTool(BaseTool):
 
         exit_code = process.returncode if not timed_out else -1
 
-        # 9.5 Output size hints — teach the agent to save-to-file
-        hint = ""
-        stdout_len = len(stdout)
-        if stdout_len > 20_000:
-            hint = (
-                f"\n\n[Warning: Very large output ({stdout_len // 1000}KB). "
-                "Next time, redirect to file: "
-                "command > /workspace/data/output.json && "
-                "jq '.key' /workspace/data/output.json]"
-            )
-        elif stdout_len > 5_000:
-            hint = (
-                "\n\n[Hint: Large output. Consider saving to "
-                "/workspace/data/ and using jq/grep to extract "
-                "specific parts.]"
-            )
-
-        # 10. Return result
         output = {
-            "stdout": stdout + hint,
+            "stdout": stdout,
             "stderr": stderr,
             "exit_code": exit_code,
             "timed_out": timed_out,

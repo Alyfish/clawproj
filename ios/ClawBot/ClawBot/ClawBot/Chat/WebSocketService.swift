@@ -36,6 +36,9 @@ protocol WebSocketServiceProtocol: AnyObject {
     func fetchWatchlistAlerts()
     func markWatchlistAlertsRead(alertIds: [String])
     func markAllWatchlistAlertsRead()
+    func sendCredentialResponse(requestId: String, domain: String, credentials: [(username: String, password: String)])
+    func sendCredentialNone(requestId: String, domain: String, reason: String)
+    func sendTokenRefreshed(service: String, token: String, requestId: String)
 }
 
 // MARK: - WebSocketService
@@ -229,6 +232,46 @@ final class WebSocketService: ObservableObject, WebSocketServiceProtocol {
         send(message)
     }
 
+    func sendCredentialResponse(requestId: String, domain: String, credentials: [(username: String, password: String)]) {
+        let credArray = credentials.map { ["username": $0.username, "password": $0.password] }
+        let message = WSMessage.request(
+            method: "credential.response",
+            id: UUID().uuidString,
+            payload: [
+                "requestId": AnyCodable(requestId),
+                "domain": AnyCodable(domain),
+                "credentials": AnyCodable(credArray),
+            ]
+        )
+        send(message)
+    }
+
+    func sendCredentialNone(requestId: String, domain: String, reason: String) {
+        let message = WSMessage.request(
+            method: "credential.none",
+            id: UUID().uuidString,
+            payload: [
+                "requestId": AnyCodable(requestId),
+                "domain": AnyCodable(domain),
+                "reason": AnyCodable(reason),
+            ]
+        )
+        send(message)
+    }
+
+    func sendTokenRefreshed(service: String, token: String, requestId: String) {
+        let message = WSMessage.request(
+            method: "credential.tokenRefreshed",
+            id: UUID().uuidString,
+            payload: [
+                "service": AnyCodable(service),
+                "token": AnyCodable(token),
+                "requestId": AnyCodable(requestId),
+            ]
+        )
+        send(message)
+    }
+
     // MARK: - Private: WebSocket lifecycle
 
     private func openWebSocket(url: URL) {
@@ -249,6 +292,9 @@ final class WebSocketService: ObservableObject, WebSocketServiceProtocol {
         }
         if let sessionId {
             payload["sessionId"] = AnyCodable(sessionId)
+        }
+        if let oauthToken = GoogleOAuthManager.shared.currentAccessToken {
+            payload["googleOAuthToken"] = AnyCodable(oauthToken)
         }
 
         let handshake = WSMessage.request(
@@ -554,6 +600,46 @@ final class MockWebSocketService: WebSocketServiceProtocol {
             id: UUID().uuidString,
             payload: [
                 "all": AnyCodable(true),
+            ]
+        )
+        sentMessages.append(message)
+    }
+
+    func sendCredentialResponse(requestId: String, domain: String, credentials: [(username: String, password: String)]) {
+        let credArray = credentials.map { ["username": $0.username, "password": $0.password] }
+        let message = WSMessage.request(
+            method: "credential.response",
+            id: UUID().uuidString,
+            payload: [
+                "requestId": AnyCodable(requestId),
+                "domain": AnyCodable(domain),
+                "credentials": AnyCodable(credArray),
+            ]
+        )
+        sentMessages.append(message)
+    }
+
+    func sendCredentialNone(requestId: String, domain: String, reason: String) {
+        let message = WSMessage.request(
+            method: "credential.none",
+            id: UUID().uuidString,
+            payload: [
+                "requestId": AnyCodable(requestId),
+                "domain": AnyCodable(domain),
+                "reason": AnyCodable(reason),
+            ]
+        )
+        sentMessages.append(message)
+    }
+
+    func sendTokenRefreshed(service: String, token: String, requestId: String) {
+        let message = WSMessage.request(
+            method: "credential.tokenRefreshed",
+            id: UUID().uuidString,
+            payload: [
+                "service": AnyCodable(service),
+                "token": AnyCodable(token),
+                "requestId": AnyCodable(requestId),
             ]
         )
         sentMessages.append(message)

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { WebSocket } from 'ws';
 import type {
   ConnectedClient,
+  ConnectPayload,
   WSMessage,
   MessageHistoryEntry,
   ApprovalHookFn,
@@ -72,6 +73,31 @@ const WatchlistMarkReadSchema = z.object({
   all: z.boolean().optional(),
 });
 
+const CredentialResponseSchema = z.object({
+  requestId: z.string().uuid(),
+  domain: z.string().min(1),
+  credentials: z
+    .array(
+      z.object({
+        username: z.string(),
+        password: z.string(),
+      }),
+    )
+    .min(1),
+});
+
+const CredentialNoneSchema = z.object({
+  requestId: z.string().uuid(),
+  domain: z.string().min(1),
+  reason: z.enum(['no_credentials', 'user_denied', 'not_imported']),
+});
+
+const OAuthTokenRefreshedSchema = z.object({
+  service: z.string().min(1),
+  token: z.string().min(1),
+  requestId: z.string().uuid().optional(),
+});
+
 const WSMessageSchema = z.object({
   type: z.enum(['req', 'res', 'event']),
   id: z.string().optional(),
@@ -79,6 +105,19 @@ const WSMessageSchema = z.object({
   event: z.string().optional(),
   payload: z.any().optional(),
 });
+
+// ── Sensitive methods (never logged or persisted) ────────────
+
+const SENSITIVE_EVENTS = new Set([
+  'credential/request',
+  'credential/response',
+  'credential/none',
+  'credential/token',
+  'credential/token:expired',
+  'credential/token:refresh',
+]);
+
+const CREDENTIAL_TIMEOUT_MS = 30_000;
 
 // ── Error codes ──────────────────────────────────────────────
 
@@ -111,6 +150,22 @@ export default class MessageRouter {
   private pushHook: PushHookFn;
   private db: GatewayDB | null;
   private scheduler: Scheduler | null = null;
+  private pendingCredentialRequests = new Map<
+    string,
+    { sessionId: string; timeoutId: NodeJS.Timeout }
+  >();
+
+  /** OAuth tokens keyed by sessionId — never persisted */
+  private oauthTokens = new Map<
+    string,
+    { token: string; service: string; providedBy: string; receivedAt: string }
+  >();
+
+  /** Pending token refresh requests keyed by requestId — 30s timeout */
+  private pendingTokenRefreshRequests = new Map<
+    string,
+    { sessionId: string; timeoutId: NodeJS.Timeout }
+  >();
 
   constructor(
     sessions: SessionManager,
@@ -220,6 +275,15 @@ export default class MessageRouter {
         break;
       case 'watchlist.alerts.markRead':
         this.handleWatchlistAlertsMarkRead(client, msg);
+        break;
+      case 'credential.response':
+        this.handleCredentialResponse(client, msg);
+        break;
+      case 'credential.none':
+        this.handleCredentialNone(client, msg);
+        break;
+      case 'credential.tokenRefreshed':
+        this.handleTokenRefreshed(client, msg);
         break;
       default:
         this.sendError(
@@ -621,6 +685,78 @@ export default class MessageRouter {
       });
     }
 
+    // Handle credential requests — route to operators with 30s timeout
+    if (msg.event === 'credential/request') {
+      const payload = msg.payload as
+        | { requestId?: string; domain?: string; reason?: string }
+        | undefined;
+      const requestId = payload?.requestId;
+      if (requestId) {
+        const timeoutId = setTimeout(() => {
+          this.pendingCredentialRequests.delete(requestId);
+          const agentNode = this.findAgentNode(client.sessionId);
+          if (agentNode) {
+            this.sendTo(agentNode.ws, {
+              type: 'event',
+              event: 'credential/none',
+              payload: {
+                requestId,
+                domain: payload?.domain ?? '',
+                reason: 'timeout',
+              },
+            });
+          }
+        }, CREDENTIAL_TIMEOUT_MS);
+        this.pendingCredentialRequests.set(requestId, {
+          sessionId: client.sessionId,
+          timeoutId,
+        });
+      }
+      this.broadcastToOperators(client.sessionId, msg);
+      return; // SENSITIVE — skip history
+    }
+
+    // Handle OAuth token expiry signals — route refresh to operators with 30s timeout
+    if (msg.event === 'credential/token:expired') {
+      const payload = msg.payload as { service?: string } | undefined;
+      const service = payload?.service ?? 'google';
+      const requestId = uuidv4();
+
+      const timeoutId = setTimeout(() => {
+        this.pendingTokenRefreshRequests.delete(requestId);
+        const agentNode = this.findAgentNode(client.sessionId);
+        if (agentNode) {
+          this.sendTo(agentNode.ws, {
+            type: 'event',
+            event: 'credential/none',
+            payload: {
+              requestId,
+              domain: `oauth:${service}`,
+              reason: 'timeout',
+            },
+          });
+        }
+      }, CREDENTIAL_TIMEOUT_MS);
+
+      this.pendingTokenRefreshRequests.set(requestId, {
+        sessionId: client.sessionId,
+        timeoutId,
+      });
+
+      // Broadcast refresh request to all operators in the session
+      this.broadcastToOperators(client.sessionId, {
+        type: 'event',
+        event: 'credential/token:refresh',
+        payload: {
+          service,
+          requestId,
+          sessionId: client.sessionId,
+        },
+      });
+
+      return; // SENSITIVE — skip history
+    }
+
     // Handle schedule task results from agent
     if (msg.event === 'schedule/task:result' && this.scheduler) {
       const payload = msg.payload as Record<string, unknown> | undefined;
@@ -674,7 +810,11 @@ export default class MessageRouter {
     }
 
     // Skip history for ephemeral browser login frames (~80KB each)
-    if ((msg.event ?? '').startsWith('browser/login:')) {
+    // and sensitive credential events (never persisted)
+    if (
+      (msg.event ?? '').startsWith('browser/login:') ||
+      SENSITIVE_EVENTS.has(msg.event ?? '')
+    ) {
       return;
     }
 
@@ -962,6 +1102,263 @@ export default class MessageRouter {
       id: msg.id,
       method: 'watchlist.alerts.markRead',
       payload: { status: 'ok' },
+    });
+  }
+
+  // ── credential.response ────────────────────────────────
+
+  private handleCredentialResponse(
+    client: ConnectedClient,
+    msg: WSMessage,
+  ): void {
+    const result = CredentialResponseSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid credential.response payload: ${result.error.message}`,
+      );
+      return;
+    }
+
+    const { requestId } = result.data;
+
+    // Clear pending timeout
+    const pending = this.pendingCredentialRequests.get(requestId);
+    if (pending) {
+      clearTimeout(pending.timeoutId);
+      this.pendingCredentialRequests.delete(requestId);
+    }
+
+    const agentNode = this.findAgentNode(client.sessionId);
+    if (!agentNode) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.NO_AGENT,
+        'No agent node connected to this session',
+      );
+      return;
+    }
+
+    // Forward to agent — no logging of payload (contains credentials)
+    this.sendTo(agentNode.ws, {
+      type: 'event',
+      event: 'credential/response',
+      payload: result.data,
+    });
+
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'credential.response',
+      payload: { status: 'sent' },
+    });
+  }
+
+  // ── credential.none ───────────────────────────────────
+
+  private handleCredentialNone(client: ConnectedClient, msg: WSMessage): void {
+    const result = CredentialNoneSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid credential.none payload: ${result.error.message}`,
+      );
+      return;
+    }
+
+    const { requestId } = result.data;
+
+    // Clear pending timeout
+    const pending = this.pendingCredentialRequests.get(requestId);
+    if (pending) {
+      clearTimeout(pending.timeoutId);
+      this.pendingCredentialRequests.delete(requestId);
+    }
+
+    const agentNode = this.findAgentNode(client.sessionId);
+    if (!agentNode) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.NO_AGENT,
+        'No agent node connected to this session',
+      );
+      return;
+    }
+
+    // Forward to agent
+    this.sendTo(agentNode.ws, {
+      type: 'event',
+      event: 'credential/none',
+      payload: result.data,
+    });
+
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'credential.none',
+      payload: { status: 'sent' },
+    });
+  }
+
+  // ── credential.tokenRefreshed ──────────────────────────
+
+  private handleTokenRefreshed(client: ConnectedClient, msg: WSMessage): void {
+    const result = OAuthTokenRefreshedSchema.safeParse(msg.payload);
+    if (!result.success) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.VALIDATION_ERROR,
+        `Invalid credential.tokenRefreshed payload: ${result.error.message}`,
+      );
+      return;
+    }
+
+    const { service, token, requestId } = result.data;
+
+    // Clear pending refresh timeout if requestId provided
+    if (requestId) {
+      const pending = this.pendingTokenRefreshRequests.get(requestId);
+      if (pending) {
+        clearTimeout(pending.timeoutId);
+        this.pendingTokenRefreshRequests.delete(requestId);
+      }
+    }
+
+    // Update stored token
+    this.oauthTokens.set(client.sessionId, {
+      token,
+      service,
+      providedBy: client.deviceToken,
+      receivedAt: new Date().toISOString(),
+    });
+
+    // Deliver refreshed token to agent
+    const agentNode = this.findAgentNode(client.sessionId);
+    if (!agentNode) {
+      this.sendError(
+        client.ws,
+        msg.id,
+        ErrorCodes.NO_AGENT,
+        'No agent node connected to this session',
+      );
+      return;
+    }
+
+    // Forward to agent — no logging of token value
+    this.sendTo(agentNode.ws, {
+      type: 'event',
+      event: 'credential/token',
+      payload: {
+        service,
+        token,
+        sessionId: client.sessionId,
+      },
+    });
+
+    this.sendTo(client.ws, {
+      type: 'res',
+      id: msg.id,
+      method: 'credential.tokenRefreshed',
+      payload: { status: 'sent' },
+    });
+
+    log('info', 'oauth:token_refreshed', {
+      sessionId: client.sessionId,
+      service,
+    });
+  }
+
+  // ── Lifecycle hooks (called by ws-server) ─────────────
+
+  /** Called after successful handshake to handle OAuth token delivery */
+  onClientConnected(client: ConnectedClient, payload: ConnectPayload): void {
+    // Operator with Google OAuth token — store and try immediate delivery
+    if (client.role === 'operator' && payload.googleOAuthToken) {
+      const tokenValue = payload.googleOAuthToken.trim();
+      if (tokenValue === '') {
+        log('warn', 'oauth:empty_token_ignored', {
+          sessionId: client.sessionId,
+        });
+        return;
+      }
+
+      const existing = this.oauthTokens.get(client.sessionId);
+      if (existing) {
+        log('warn', 'oauth:token_overwritten', {
+          sessionId: client.sessionId,
+          previousProvider: existing.providedBy,
+        });
+      }
+
+      this.oauthTokens.set(client.sessionId, {
+        token: tokenValue,
+        service: 'google',
+        providedBy: client.deviceToken,
+        receivedAt: new Date().toISOString(),
+      });
+
+      log('info', 'oauth:token_stored', {
+        sessionId: client.sessionId,
+        service: 'google',
+      });
+
+      // Try to deliver if agent already in session
+      this.tryDeliverOAuthToken(client.sessionId);
+      return;
+    }
+
+    // Agent connecting — check for pending token to deliver
+    if (client.role === 'node' && client.scopes.includes('agent')) {
+      this.tryDeliverOAuthToken(client.sessionId);
+    }
+  }
+
+  /** Called when a client disconnects — cleans up session-scoped tokens */
+  onClientDisconnected(sessionId: string): void {
+    const remainingClients = this.sessions.getSessionClients(sessionId);
+    if (remainingClients.length === 0) {
+      this.oauthTokens.delete(sessionId);
+
+      // Clear any pending refresh timeouts for this session
+      for (const [requestId, pending] of this.pendingTokenRefreshRequests) {
+        if (pending.sessionId === sessionId) {
+          clearTimeout(pending.timeoutId);
+          this.pendingTokenRefreshRequests.delete(requestId);
+        }
+      }
+
+      log('info', 'oauth:session_cleanup', { sessionId });
+    }
+  }
+
+  /** Deliver stored OAuth token to the agent in a session, if both exist */
+  private tryDeliverOAuthToken(sessionId: string): void {
+    const tokenEntry = this.oauthTokens.get(sessionId);
+    if (!tokenEntry) return;
+
+    const agentNode = this.findAgentNode(sessionId);
+    if (!agentNode) return;
+
+    this.sendTo(agentNode.ws, {
+      type: 'event',
+      event: 'credential/token',
+      payload: {
+        service: tokenEntry.service,
+        token: tokenEntry.token,
+        sessionId,
+      },
+    });
+
+    log('info', 'oauth:token_delivered', {
+      sessionId,
+      service: tokenEntry.service,
     });
   }
 

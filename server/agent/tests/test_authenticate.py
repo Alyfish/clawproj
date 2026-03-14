@@ -1,7 +1,7 @@
 """
 Tests for the CDPBrowserTool.authenticate action.
 
-Tests:
+Tests (legacy auto-fill pipeline — _authenticate_legacy):
 - Happy path: auto-fill credentials → submit → authenticated
 - Already authenticated: skip login form
 - No credentials found: falls back to manual login flow
@@ -12,6 +12,14 @@ Tests:
 - Auto-fill exception: falls back to manual
 - No login flow manager: returns error on fallback
 - credential_name param matching
+
+Tests (LoginHandler delegation — _authenticate):
+- Delegates to LoginHandler when wired
+- LoginHandler returns False → manual_login_started
+- LoginHandler raises → error returned
+- No LoginHandler → falls to legacy
+- _login tries LoginHandler before interactive
+- _login falls through to interactive on failure
 """
 import asyncio
 from dataclasses import dataclass, field
@@ -165,7 +173,7 @@ async def test_authenticate_happy_path(browser_tool, mock_page):
 
     mock_page.evaluate = patched_evaluate
 
-    result = await browser_tool._authenticate(mock_page, {
+    result = await browser_tool._authenticate_legacy(mock_page, {
         "url": "https://accounts.example.com/login",
     })
 
@@ -181,7 +189,7 @@ async def test_authenticate_already_authenticated(browser_tool, mock_page, mock_
     """If already authenticated, skip login entirely."""
     mock_page._auth_indicators = True
 
-    result = await browser_tool._authenticate(mock_page, {
+    result = await browser_tool._authenticate_legacy(mock_page, {
         "url": "https://accounts.example.com/",
     })
 
@@ -197,7 +205,7 @@ async def test_authenticate_no_credentials_fallback(browser_tool, mock_page, moc
     # URL that doesn't match any stored creds
     mock_page.url = "https://unknown-site.com/login"
 
-    result = await browser_tool._authenticate(mock_page, {
+    result = await browser_tool._authenticate_legacy(mock_page, {
         "url": "https://unknown-site.com/login",
     })
 
@@ -222,7 +230,7 @@ async def test_authenticate_2fa_detected(browser_tool, mock_page, mock_login_flo
 
     mock_page.evaluate = patched_evaluate
 
-    result = await browser_tool._authenticate(mock_page, {
+    result = await browser_tool._authenticate_legacy(mock_page, {
         "url": "https://accounts.example.com/login",
     })
 
@@ -246,7 +254,7 @@ async def test_authenticate_captcha_detected(browser_tool, mock_page, mock_login
 
     mock_page.evaluate = patched_evaluate
 
-    result = await browser_tool._authenticate(mock_page, {
+    result = await browser_tool._authenticate_legacy(mock_page, {
         "url": "https://accounts.example.com/login",
     })
 
@@ -264,7 +272,7 @@ async def test_authenticate_no_login_form(browser_tool, mock_page, mock_login_fl
         "hasSubmit": False,
     }
 
-    result = await browser_tool._authenticate(mock_page, {
+    result = await browser_tool._authenticate_legacy(mock_page, {
         "url": "https://accounts.example.com/",
     })
 
@@ -274,35 +282,36 @@ async def test_authenticate_no_login_form(browser_tool, mock_page, mock_login_fl
 
 
 @pytest.mark.asyncio
-async def test_authenticate_missing_url():
-    """Missing URL parameter → error."""
+async def test_authenticate_missing_domain():
+    """Missing domain parameter → error."""
     tool = CDPBrowserTool()
     page = MockAuthPage()
 
     result = await tool._authenticate(page, {})
 
     assert result["success"] is False
-    assert "url" in result["error"].lower()
+    assert "domain" in result["error"].lower()
 
 
 @pytest.mark.asyncio
-async def test_authenticate_no_login_flow_manager_on_fallback(mock_page, mock_credential_lookup, mock_profile_manager):
-    """No login flow manager when fallback needed → error."""
+async def test_authenticate_no_login_handler_falls_to_legacy(mock_page, mock_credential_lookup, mock_profile_manager):
+    """No LoginHandler and no LoginFlowManager → legacy path fails gracefully."""
     tool = CDPBrowserTool(
         profile_manager=mock_profile_manager,
         credential_lookup=mock_credential_lookup,
     )
     tool._active_profile = "default"
     tool._navigate = AsyncMock(return_value={"success": True, "url": ""})
-    # Do NOT set _login_flow_manager
+    # No _login_handler, no _login_flow_manager → legacy fallback runs but can't do manual handoff
 
     # URL that won't match credentials
     mock_page.url = "https://unknown.com/login"
 
     result = await tool._authenticate(mock_page, {
-        "url": "https://unknown.com/login",
+        "domain": "unknown.com",
     })
 
+    # Falls to legacy, which tries manual but no login_flow_manager → error
     assert result["success"] is False
     assert "not available" in result["error"].lower()
 
@@ -343,7 +352,7 @@ async def test_authenticate_multi_step_login(browser_tool, mock_page, mock_login
 
     mock_page.evaluate = patched_evaluate
 
-    result = await browser_tool._authenticate(mock_page, {
+    result = await browser_tool._authenticate_legacy(mock_page, {
         "url": "https://accounts.example.com/login",
     })
 
@@ -380,7 +389,7 @@ async def test_authenticate_autofill_exception(browser_tool, mock_page, mock_log
     loc.first = first
     mock_page._locators["#email"] = loc
 
-    result = await browser_tool._authenticate(mock_page, {
+    result = await browser_tool._authenticate_legacy(mock_page, {
         "url": "https://accounts.example.com/login",
     })
 
@@ -458,3 +467,178 @@ class TestGetSiteLogin:
 
         result = store.get_site_login("https://google.com")
         assert result is None
+
+
+# ── LoginHandler delegation tests ────────────────────────────
+
+@pytest.fixture
+def mock_login_handler():
+    """Mock LoginHandler with handle_login_wall."""
+    handler = MagicMock()
+    handler.handle_login_wall = AsyncMock(return_value=True)
+    return handler
+
+
+@pytest.fixture
+def browser_tool_with_login_handler(
+    mock_credential_lookup, mock_profile_manager,
+    mock_login_flow_manager, mock_login_handler,
+):
+    tool = CDPBrowserTool(
+        profile_manager=mock_profile_manager,
+        credential_lookup=mock_credential_lookup,
+    )
+    tool._login_flow_manager = mock_login_flow_manager
+    tool._login_handler = mock_login_handler
+    tool._active_profile = "default"
+    tool._current_session_id = "test-session"
+    tool._navigate = AsyncMock(return_value={"success": True, "url": ""})
+    return tool
+
+
+@pytest.mark.asyncio
+async def test_authenticate_delegates_to_login_handler(
+    browser_tool_with_login_handler, mock_page, mock_login_handler,
+):
+    """_authenticate delegates to LoginHandler when wired → success."""
+    result = await browser_tool_with_login_handler._authenticate(
+        mock_page, {"domain": "example.com"}
+    )
+
+    assert result["success"] is True
+    assert result["domain"] == "example.com"
+    assert "authenticated" in result.get("message", "").lower() or result["success"]
+    mock_login_handler.handle_login_wall.assert_called_once_with(
+        mock_page, "example.com",
+        profile="default", session_id="test-session", reason="",
+    )
+
+
+@pytest.mark.asyncio
+async def test_authenticate_login_handler_returns_false(
+    browser_tool_with_login_handler, mock_page, mock_login_handler,
+):
+    """LoginHandler returns False → manual login needed."""
+    mock_login_handler.handle_login_wall = AsyncMock(return_value=False)
+
+    result = await browser_tool_with_login_handler._authenticate(
+        mock_page, {"domain": "hardsite.com"}
+    )
+
+    assert result["success"] is False
+    assert result["domain"] == "hardsite.com"
+    assert "sign-in" in result.get("message", "").lower()
+
+
+@pytest.mark.asyncio
+async def test_authenticate_login_handler_exception(
+    browser_tool_with_login_handler, mock_page, mock_login_handler,
+):
+    """LoginHandler raises → error returned with details."""
+    mock_login_handler.handle_login_wall = AsyncMock(
+        side_effect=RuntimeError("Connection timeout")
+    )
+
+    result = await browser_tool_with_login_handler._authenticate(
+        mock_page, {"domain": "broken.com"}
+    )
+
+    assert result["success"] is False
+    assert "broken.com" in result.get("error", "")
+    assert "Connection timeout" in result.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_authenticate_no_login_handler_uses_legacy(
+    mock_page, mock_credential_lookup, mock_profile_manager,
+    mock_login_flow_manager,
+):
+    """No LoginHandler → falls back to legacy auto-fill pipeline."""
+    tool = CDPBrowserTool(
+        profile_manager=mock_profile_manager,
+        credential_lookup=mock_credential_lookup,
+    )
+    tool._login_flow_manager = mock_login_flow_manager
+    tool._active_profile = "default"
+    tool._navigate = AsyncMock(return_value={"success": True, "url": ""})
+    # _login_handler is None (default)
+
+    # example.com matches the mock_credential_lookup
+    mock_page._auth_indicators = True  # Already authenticated shortcut
+
+    result = await tool._authenticate(
+        mock_page, {"domain": "accounts.example.com"}
+    )
+
+    # Legacy path: already_authenticated
+    assert result["success"] is True
+    assert result["status"] == "already_authenticated"
+
+
+@pytest.mark.asyncio
+async def test_login_tries_login_handler_first(
+    browser_tool_with_login_handler, mock_page,
+    mock_login_handler, mock_login_flow_manager,
+):
+    """_login tries LoginHandler before LoginFlowManager."""
+    result = await browser_tool_with_login_handler._login(
+        mock_page, {"url": "https://example.com/login"}
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "authenticated"
+    assert result["domain"] == "example.com"
+    mock_login_handler.handle_login_wall.assert_called_once()
+    mock_login_flow_manager.start_login_flow.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_login_falls_through_to_interactive(
+    browser_tool_with_login_handler, mock_page,
+    mock_login_handler, mock_login_flow_manager,
+):
+    """LoginHandler returns False in _login → falls to interactive."""
+    mock_login_handler.handle_login_wall = AsyncMock(return_value=False)
+
+    result = await browser_tool_with_login_handler._login(
+        mock_page, {"url": "https://example.com/login"}
+    )
+
+    # Should fall through to LoginFlowManager
+    mock_login_flow_manager.start_login_flow.assert_called_once()
+    assert result["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_login_handler_exception_falls_to_interactive(
+    browser_tool_with_login_handler, mock_page,
+    mock_login_handler, mock_login_flow_manager,
+):
+    """LoginHandler raises in _login → falls to interactive."""
+    mock_login_handler.handle_login_wall = AsyncMock(
+        side_effect=Exception("Network error")
+    )
+
+    result = await browser_tool_with_login_handler._login(
+        mock_page, {"url": "https://example.com/login"}
+    )
+
+    mock_login_flow_manager.start_login_flow.assert_called_once()
+    assert result["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_authenticate_passes_reason(
+    browser_tool_with_login_handler, mock_page, mock_login_handler,
+):
+    """_authenticate passes reason parameter to LoginHandler."""
+    result = await browser_tool_with_login_handler._authenticate(
+        mock_page, {"domain": "example.com", "reason": "Need to check email"}
+    )
+
+    assert result["success"] is True
+    mock_login_handler.handle_login_wall.assert_called_once_with(
+        mock_page, "example.com",
+        profile="default", session_id="test-session",
+        reason="Need to check email",
+    )

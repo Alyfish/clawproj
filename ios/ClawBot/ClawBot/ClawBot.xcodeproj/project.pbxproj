@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA0AF1072F60000100000007 /* ClawBotAutoFill.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = AA0AF1012F60000100000001 /* ClawBotAutoFill.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		01B2F1C42F53CF27008FDBDC /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -21,17 +25,52 @@
 			remoteGlobalIDString = 01B2F1B52F53CF26008FDBDC;
 			remoteInfo = ClawBot;
 		};
+		AA0AF1042F60000100000004 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 01B2F1AE2F53CF26008FDBDC /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA0AF1102F60000100000010;
+			remoteInfo = ClawBotAutoFill;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		AA0AF1062F60000100000006 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				AA0AF1072F60000100000007 /* ClawBotAutoFill.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		01B2F1B62F53CF26008FDBDC /* ClawBot.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClawBot.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		01B2F1C32F53CF27008FDBDC /* ClawBotTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ClawBotTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		01B2F1CD2F53CF27008FDBDC /* ClawBotUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ClawBotUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA0AF1012F60000100000001 /* ClawBotAutoFill.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ClawBotAutoFill.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		AA0AF1032F60000100000003 /* Exceptions for "ClawBot" folder in "ClawBotAutoFill" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Credentials/CredentialStore.swift,
+			);
+			target = AA0AF1102F60000100000010 /* ClawBotAutoFill */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		01B2F1B82F53CF26008FDBDC /* ClawBot */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				AA0AF1032F60000100000003 /* Exceptions for "ClawBot" folder in "ClawBotAutoFill" target */,
+			);
 			path = ClawBot;
 			sourceTree = "<group>";
 		};
@@ -43,6 +82,11 @@
 		01B2F1D02F53CF27008FDBDC /* ClawBotUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = ClawBotUITests;
+			sourceTree = "<group>";
+		};
+		AA0AF1022F60000100000002 /* ClawBotAutoFill */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ClawBotAutoFill;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -69,6 +113,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AA0AF1122F60000100000012 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -76,6 +127,7 @@
 			isa = PBXGroup;
 			children = (
 				01B2F1B82F53CF26008FDBDC /* ClawBot */,
+				AA0AF1022F60000100000002 /* ClawBotAutoFill */,
 				01B2F1C62F53CF27008FDBDC /* ClawBotTests */,
 				01B2F1D02F53CF27008FDBDC /* ClawBotUITests */,
 				01B2F1B72F53CF26008FDBDC /* Products */,
@@ -86,6 +138,7 @@
 			isa = PBXGroup;
 			children = (
 				01B2F1B62F53CF26008FDBDC /* ClawBot.app */,
+				AA0AF1012F60000100000001 /* ClawBotAutoFill.appex */,
 				01B2F1C32F53CF27008FDBDC /* ClawBotTests.xctest */,
 				01B2F1CD2F53CF27008FDBDC /* ClawBotUITests.xctest */,
 			);
@@ -102,10 +155,12 @@
 				01B2F1B22F53CF26008FDBDC /* Sources */,
 				01B2F1B32F53CF26008FDBDC /* Frameworks */,
 				01B2F1B42F53CF26008FDBDC /* Resources */,
+				AA0AF1062F60000100000006 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				AA0AF1052F60000100000005 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				01B2F1B82F53CF26008FDBDC /* ClawBot */,
@@ -163,6 +218,28 @@
 			productReference = 01B2F1CD2F53CF27008FDBDC /* ClawBotUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		AA0AF1102F60000100000010 /* ClawBotAutoFill */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA0AF1202F60000100000020 /* Build configuration list for PBXNativeTarget "ClawBotAutoFill" */;
+			buildPhases = (
+				AA0AF1112F60000100000011 /* Sources */,
+				AA0AF1122F60000100000012 /* Frameworks */,
+				AA0AF1132F60000100000013 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				AA0AF1022F60000100000002 /* ClawBotAutoFill */,
+			);
+			name = ClawBotAutoFill;
+			packageProductDependencies = (
+			);
+			productName = ClawBotAutoFill;
+			productReference = AA0AF1012F60000100000001 /* ClawBotAutoFill.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -184,6 +261,9 @@
 						CreatedOnToolsVersion = 26.2;
 						TestTargetID = 01B2F1B52F53CF26008FDBDC;
 					};
+					AA0AF1102F60000100000010 = {
+						CreatedOnToolsVersion = 26.2;
+					};
 				};
 			};
 			buildConfigurationList = 01B2F1B12F53CF26008FDBDC /* Build configuration list for PBXProject "ClawBot" */;
@@ -201,6 +281,7 @@
 			projectRoot = "";
 			targets = (
 				01B2F1B52F53CF26008FDBDC /* ClawBot */,
+				AA0AF1102F60000100000010 /* ClawBotAutoFill */,
 				01B2F1C22F53CF27008FDBDC /* ClawBotTests */,
 				01B2F1CC2F53CF27008FDBDC /* ClawBotUITests */,
 			);
@@ -223,6 +304,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		01B2F1CB2F53CF27008FDBDC /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA0AF1132F60000100000013 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -253,6 +341,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AA0AF1112F60000100000011 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -265,6 +360,11 @@
 			isa = PBXTargetDependency;
 			target = 01B2F1B52F53CF26008FDBDC /* ClawBot */;
 			targetProxy = 01B2F1CE2F53CF27008FDBDC /* PBXContainerItemProxy */;
+		};
+		AA0AF1052F60000100000005 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA0AF1102F60000100000010 /* ClawBotAutoFill */;
+			targetProxy = AA0AF1042F60000100000004 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -390,11 +490,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = ClawBot/ClawBot.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = K9276M9LMX;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSUserActivityTypes = "com.apple.authentication-services.credential-exchange";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -426,11 +528,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = ClawBot/ClawBot.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = K9276M9LMX;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSUserActivityTypes = "com.apple.authentication-services.credential-exchange";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -547,6 +651,66 @@
 			};
 			name = Release;
 		};
+		AA0AF1212F60000100000021 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ClawBotAutoFill/ClawBotAutoFill.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K9276M9LMX;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "ClawBotAutoFill-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "ClawBot AutoFill";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = startup.ClawBot.AutoFill;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		AA0AF1222F60000100000022 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ClawBotAutoFill/ClawBotAutoFill.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K9276M9LMX;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "ClawBotAutoFill-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "ClawBot AutoFill";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = startup.ClawBot.AutoFill;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -582,6 +746,15 @@
 			buildConfigurations = (
 				01B2F1DE2F53CF27008FDBDC /* Debug */,
 				01B2F1DF2F53CF27008FDBDC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AA0AF1202F60000100000020 /* Build configuration list for PBXNativeTarget "ClawBotAutoFill" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA0AF1212F60000100000021 /* Debug */,
+				AA0AF1222F60000100000022 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

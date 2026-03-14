@@ -99,7 +99,16 @@ struct ApprovalStoreTests {
         let dir = makeTempDir()
         let store = ApprovalStore(directory: dir)
 
-        try await store.save(pending: [.mockSubmit], history: [.mockApproved])
+        // Use a fresh date so the pending request isn't expired by the 24h stale filter
+        let freshRequest = ApprovalRequest(
+            id: "approval-101",
+            taskId: "task-003",
+            action: .submit,
+            description: "Submit rental application",
+            details: ["property": "245 Bedford Ave"],
+            createdAt: ISO8601DateFormatter().string(from: Date())
+        )
+        try await store.save(pending: [freshRequest], history: [.mockApproved])
         let loaded = try await store.load()
 
         #expect(loaded.pending.count == 1)

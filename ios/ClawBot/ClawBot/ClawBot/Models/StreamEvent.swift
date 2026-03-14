@@ -38,6 +38,10 @@ enum StreamEvent {
     case watchUpdate(action: String, watch: [String: AnyCodable]?, alert: [String: AnyCodable]?)
     /// Flat watchlist alert emitted by the agent's emit_alert tool.
     case watchlistAlert(alert: WatchlistAlert)
+    /// Agent requesting credentials for a domain (sensitive — never persisted).
+    case credentialRequested(requestId: String, domain: String, reason: String)
+    /// Gateway requesting a fresh OAuth token (sensitive — never persisted).
+    case tokenRefreshRequested(service: String, requestId: String)
     /// Unrecognised event name — forward-compatible.
     case unknown(event: String, payload: [String: AnyCodable]?)
 
@@ -184,6 +188,17 @@ enum StreamEvent {
                     ?? ISO8601DateFormatter().string(from: Date())
             )
             return .watchlistAlert(alert: alert)
+
+        case "credential/request":
+            guard let requestId = p?["requestId"]?.stringValue,
+                  let domain = p?["domain"]?.stringValue else { return nil }
+            let reason = p?["reason"]?.stringValue ?? ""
+            return .credentialRequested(requestId: requestId, domain: domain, reason: reason)
+
+        case "credential/token:refresh":
+            guard let service = p?["service"]?.stringValue,
+                  let requestId = p?["requestId"]?.stringValue else { return nil }
+            return .tokenRefreshRequested(service: service, requestId: requestId)
 
         default:
             return .unknown(event: eventName, payload: p)
